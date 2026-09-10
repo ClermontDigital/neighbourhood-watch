@@ -12,11 +12,12 @@ NW_LOCATION_HINT = "oc"
 # by guessing paths. An empty list accepts nothing.
 NW_HOODS = "clermont"
 
-# Deploying creates the route as well, so there is nothing to add by hand in
-# the dashboard. The zone must already be on the same Cloudflare account.
+# A custom domain rather than a plain route. A route matches traffic for a
+# hostname that already resolves, so on a brand new subdomain it attaches to
+# nothing. A custom domain provisions the DNS record and the certificate too.
 [[routes]]
-pattern = "nw.clermont.digital/*"
-zone_name = "clermont.digital"
+pattern = "nw.clermont.digital"
+custom_domain = true
 
 [[durable_objects.bindings]]
 name = "HOOD"

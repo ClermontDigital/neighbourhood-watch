@@ -94,8 +94,10 @@ npx wrangler deploy
 openssl rand -base64 32 | npx wrangler secret put NW_ADMIN_TOKEN
 ```
 
-Deploying creates the DNS route too, so there is nothing to add by hand in the dashboard. TLS
-is Cloudflare's, so there are no certificates to generate, distribute or renew.
+Deploying registers `nw.clermont.digital` as a **custom domain**, which provisions the DNS
+record and the certificate as well, so there is nothing to add by hand in the dashboard. A
+plain Workers route would not have been enough: a route only matches traffic for a hostname
+that already resolves, so on a brand new subdomain it attaches to nothing.
 
 Then set the offline grace window. Ninety seconds is sensible: Starlink drops for five to
 fifteen seconds regularly, and a neighbourhood full of false offline alerts is a neighbourhood
