@@ -1,31 +1,25 @@
-# Neighbourhood Watch
+# Neighbourhood Watch - Shared Security Status for Home Assistant
 
-Link separate Home Assistant deployments together for security, and nothing else.
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![HACS Badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/custom-components/hacs)
+[![Version](https://img.shields.io/badge/version-0.1.0-green.svg)](https://github.com/ClermontDigital/neighbourhood-watch)
 
-Each property runs its own Home Assistant. Neighbourhood Watch gives every one of them a
-dashboard showing all the others: armed, disarmed, person detected, panic, or offline. When
-something happens at one property, every property knows.
+Link separate Home Assistant deployments into a neighbourhood watch. Each property runs its own
+instance and sees all the others: armed, disarmed, person detected, panic, or offline. It shares
+a status and nothing more. No cameras, no entities, no presence, no idea who is home.
 
-It shares a status and nothing more. No cameras, no entities, no presence, no idea who is home.
+## Features
 
----
-
-## Why not just link the instances
-
-The obvious approaches do not survive contact with a real neighbourhood:
-
-- **Sharing Home Assistant tokens** (which is what generic instance-linking integrations need)
-  hands your neighbour full administrative access to your house so they can see one status
-  light.
-- **Peer to peer** needs inbound connectivity. Rural properties are on Starlink or 4G, both
-  CGNAT, so there is no inbound anything.
-- **A shared MQTT broker** collides with the one MQTT broker Home Assistant allows you to
-  configure. If you already run Zigbee2MQTT, or ever want to, you are stuck.
-
-So every property holds one **outbound** WebSocket to a small relay. Nobody hands out a token,
-nothing needs a port forward, and the relay can only ever see the statuses it is sent.
-
----
+- 🏠 **A tile per property** - family photo or icon, colour coded ring, name, state and relative time. Trouble floats to the top.
+- 🚨 **Panic button** - press and hold for two seconds. Fires at any hour, armed or not, and shows as its own state rather than a flavour of alert.
+- 👤 **Person detection while armed** - reads the camera sensors you already have, with a debounce so split second false positives never reach the street.
+- 📡 **Offline detection** - a property that drops off is shown as offline, after a grace window so a satellite blip does not light up the neighbourhood.
+- 🔌 **Works behind CGNAT** - every link is outbound only, so Starlink and 4G properties need no port forward, no static IP and no VPN.
+- 🔑 **One paste to join** - a join code carries everything. No broker settings, no certificates, and nobody ever hands out a Home Assistant token.
+- 📇 **Generated dashboard** - a registered strategy builds the same view at every property, so a house that joins appears on everyone's dashboard with nothing edited anywhere.
+- 🔔 **Events, not opinions** - the integration raises the message and stops. Every household writes its own routine.
+- 🔒 **Revocable per property** - cutting one off is instant and touches nobody else.
+- 🚀 **HACS ready**
 
 ## How it works
 
@@ -42,31 +36,44 @@ nothing needs a port forward, and the relay can only ever see the statuses it is
                     +-----------------+
 ```
 
-The relay holds the roster and, for each property, its display name, icon, optional picture,
-current state, the optional short label saying which sensor fired, and connection timestamps.
-It never initiates anything and it cannot reach into any property.
-
 Each property publishes one of four states. The relay derives a fifth.
 
-| State | Meaning |
-|---|---|
-| `panic` | Someone pressed the panic button. Any hour, armed or not. |
-| `alert` | Person detection while armed, held past the debounce |
-| `armed` | Armed, nothing wrong |
-| `disarmed` | Not armed |
-| `offline` | Connection gone past the grace window. Derived, never published. |
+| State | Meaning | Tile |
+|---|---|---|
+| `panic` | Someone pressed the panic button. Any hour, armed or not. | Magenta, pulsing |
+| `alert` | Person detection while armed, held past the debounce | Red |
+| `armed` | Armed, nothing wrong | Blue |
+| `disarmed` | Not armed | Slate, dimmed |
+| `offline` | Connection gone past the grace window. Derived, never published. | Grey, hatched |
 
----
+### Why not just link the instances
 
-## Setup
+The obvious approaches do not survive contact with a real neighbourhood:
+
+- **Sharing Home Assistant tokens**, which generic instance-linking integrations need, hands your neighbour full administrative access to your house so they can see one status light.
+- **Peer to peer** needs inbound connectivity. Rural properties are on Starlink or 4G, both CGNAT, so there is no inbound anything.
+- **A shared MQTT broker** collides with the one broker Home Assistant lets you configure. If you already run Zigbee2MQTT, or ever want to, you are stuck.
+
+## Quick Setup
 
 There are two roles: whoever runs the relay for the neighbourhood, and each property.
 
-### Part 1: the neighbourhood relay (once, by one person)
+### Requirements
 
-The relay runs on Cloudflare Workers. SQLite-backed Durable Objects run on the free plan, and
-WebSocket hibernation means idle connections cost nothing, so a neighbourhood of a dozen
-properties sits comfortably inside the free tier.
+- Home Assistant 2026.5.0 or newer, on every property
+- A Cloudflare account with a domain on it, for the relay. The free plan is enough.
+- Node and `npx`, on the machine that deploys the relay only
+
+### Installation
+
+**HACS** > three dots > Custom repositories > add
+`https://github.com/ClermontDigital/neighbourhood-watch`, category **Integration**. Install,
+then restart Home Assistant.
+
+The cards and the dashboard strategy are registered automatically on first setup. There is no
+resource to add by hand.
+
+### Deploy the relay (once, by one person)
 
 ```bash
 git clone https://github.com/ClermontDigital/neighbourhood-watch.git
@@ -74,35 +81,35 @@ cd neighbourhood-watch/relay
 npm install
 ```
 
-Point it at your own hostname and deploy:
+`wrangler.toml` is already set up for `nw.clermont.digital`. Change `NW_RELAY_URL`, the route
+and `NW_HOODS` together if you deploy elsewhere: join codes are built from `NW_RELAY_URL`, so if
+it disagrees with the route every code points at nothing.
 
 ```bash
-# edit wrangler.toml: set NW_RELAY_URL to your wss:// hostname, and put your
-# neighbourhood's id in NW_HOODS. Anything not in that allowlist is refused
-# before a Durable Object is created, so nobody can run up your bill by
-# guessing paths.
+wrangler login                        # as the account holding the zone
+export CLOUDFLARE_ACCOUNT_ID=...      # only if that login sees several accounts
 npx wrangler deploy
 
 # an admin token, known only to you, that gates invites and revocations
 openssl rand -base64 32 | npx wrangler secret put NW_ADMIN_TOKEN
 ```
 
-Add the route in the Cloudflare dashboard so `nw.yourdomain.com` reaches the Worker. TLS is
-Cloudflare's, so there are no certificates to generate, distribute or renew.
+Deploying creates the DNS route too, so there is nothing to add by hand in the dashboard. TLS
+is Cloudflare's, so there are no certificates to generate, distribute or renew.
 
-Then set the offline grace window. Ninety seconds is a sensible default: Starlink drops for
-five to fifteen seconds regularly, and a neighbourhood full of false offline alerts is a
-neighbourhood that stops looking at the dashboard.
+Then set the offline grace window. Ninety seconds is sensible: Starlink drops for five to
+fifteen seconds regularly, and a neighbourhood full of false offline alerts is a neighbourhood
+that stops looking at the dashboard.
 
 ```bash
-export NW_RELAY=https://nw.yourdomain.com
-export NW_ADMIN_TOKEN=...          # the one you just generated
-export NW_HOOD=clermont-north      # any short name for this neighbourhood
+export NW_RELAY=https://nw.clermont.digital
+export NW_ADMIN_TOKEN=...
+export NW_HOOD=clermont
 
 ./tools/nw-hood grace 90
 ```
 
-### Part 2: invite each property
+### Invite each property
 
 ```bash
 ./tools/nw-hood invite mckays --name "McKays" --icon mdi:home-group
@@ -115,19 +122,14 @@ That prints a join code, and a QR if `qrencode` is installed:
 
   Join code, paste this into their Home Assistant:
 
-  NW1.eyJ2IjoxLCJ1Ijoid3NzOi8vbncueW91cmRvbWFpbi5jb20vaG9vZC9jbGVy...
+  NW1.eyJ2IjoxLCJ1Ijoid3NzOi8vbncuY2xlcm1vbnQuZGlnaXRhbC9ob29kL2Ns...
 ```
 
-The code carries the relay URL, the property id, and a token that belongs to that property
-alone.
-
-**Treat a join code like a password until it has been used.** It is a live credential, and
-anyone holding an unused one can connect as that property: they would see the whole
-neighbourhood's roster and states, and could publish false states including panic. Once the
-property connects for the first time, the relay binds the code to that install, and the code is
-useless to anyone else. So send it over whatever channel you like, but if it sits unused for a
-week, reissue it with `--rotate` rather than assuming nobody else saw it. Codes for someone who
-will not set up straight away are worth an `--expires-in`.
+**Treat a join code like a password until it has been used.** It is a live credential: anyone
+holding an unused one can connect as that property, see the whole neighbourhood, and publish
+false states including panic. Once the property connects for the first time the relay binds the
+code to that install and it is useless to anyone else. If a code sits unused for a week, reissue
+it with `--rotate` rather than assuming nobody saw it.
 
 Other commands:
 
@@ -138,17 +140,12 @@ Other commands:
 ./tools/nw-hood invite dawsons --expires-in 86400   # code stops working in a day
 ```
 
-### Part 3: each property
+### Configuration
 
-**Install.** HACS > three dots > Custom repositories > add
-`https://github.com/ClermontDigital/neighbourhood-watch`, category Integration. Install, then
-restart Home Assistant.
+**Pair.** Settings > Devices & services > Add integration > Neighbourhood Watch. One field.
+Paste the join code.
 
-**Pair.** Settings > Devices & services > Add integration > Neighbourhood Watch. There is one
-field. Paste the join code. That is the entire pairing process: no broker, no host, no port, no
-certificate.
-
-**Point it at your existing security.** Open the integration's Configure and choose:
+**Point it at your existing security.** Open the integration's **Configure**:
 
 | Option | What to pick |
 |---|---|
@@ -160,33 +157,50 @@ certificate.
 | Tile icon and picture | How this property appears on everyone's dashboard. |
 
 Neighbourhood Watch **does not arm anything itself**. It reads what you already have and
-publishes the roll-up. Your existing automations keep working untouched.
+publishes the roll-up, so your existing automations keep working untouched.
 
 **Add the dashboard.** Settings > Dashboards > Add dashboard > **Community dashboards** >
 Neighbourhood Watch.
 
-That is a generated dashboard, not a copied one. The cards discover properties as they render,
-so when a new property joins the neighbourhood it appears on everyone's dashboard with nothing
-edited anywhere.
+That view is generated, not copied. The cards discover properties as they render, so a new
+property appears everywhere with nothing edited.
 
----
+## Usage
 
-## The widgets
+### Entities Created
 
-Seven cards, all in one resource, all sharing one visual language so a red tile means the same
-thing at every property. That is a safety property, not a cosmetic one.
+For this property:
+
+| Entity | Purpose |
+|---|---|
+| `sensor.*_status` | What this property is publishing right now |
+| `binary_sensor.*_hood_link` | Whether the relay connection is up |
+| `button.*_panic` | Raise a panic |
+| `button.*_clear` | Clear a latched panic or lingering alert |
+| `switch.*_publish_status` | Privacy kill switch. Off disconnects entirely. |
+
+For each neighbouring property, grouped as its own device:
+
+| Entity | Purpose |
+|---|---|
+| `sensor.*_status` | The five state roll-up. Drives the tile. |
+| `binary_sensor.*_alarm` | On for alert or panic |
+| `binary_sensor.*_panic` | On for panic only |
+| `binary_sensor.*_online` | On while reachable |
+
+### The card pack
+
+Seven cards, one visual language, so a red tile means the same thing at every property.
 
 | Card | What it is for |
 |---|---|
 | `custom:neighbourhood-watch-card` | The grid of property tiles. The main one. |
-| `custom:neighbourhood-watch-banner` | Full width alert bar. Renders nothing at all when everything is fine, takes over when it is not. Put it at the top of every view. |
-| `custom:neighbourhood-watch-panic` | Press and hold for two seconds to raise a panic. |
+| `custom:neighbourhood-watch-banner` | Full width alert bar. Renders nothing when all is well. Put it at the top of every view. |
+| `custom:neighbourhood-watch-panic` | Press and hold for two seconds. |
 | `custom:neighbourhood-watch-self` | What this property is publishing, and whether the link is up. |
-| `custom:neighbourhood-watch-tile` | A single property, to drop into a dashboard you already have. |
+| `custom:neighbourhood-watch-tile` | A single property, for a dashboard you already have. |
 | `custom:neighbourhood-watch-log` | Live feed of neighbourhood events. |
 | `custom:neighbourhood-watch-badge` | Compact badge for a sections view header. |
-
-Hand-built example:
 
 ```yaml
 type: custom:neighbourhood-watch-card
@@ -206,55 +220,14 @@ strategy:
 
 Colour is never the only signal. This is a display people read half asleep, and roughly eight
 percent of men have some colour vision deficiency, so every state carries a colour, an icon and
-a word.
-
-| State | Colour | Icon | Label |
-|---|---|---|---|
-| Panic | Magenta, pulsing | `mdi:alarm-light` | PANIC |
-| Alert | Red | `mdi:account-alert` | PERSON |
-| Armed | Blue | `mdi:shield-check` | ARMED |
-| Disarmed | Slate, dimmed | `mdi:shield-off-outline` | DISARMED |
-| Offline | Grey, hatched | `mdi:lan-disconnect` | OFFLINE |
-
-Panic is magenta rather than a deeper red deliberately. Red against red is exactly the
+a word. Panic is magenta rather than a deeper red on purpose: red against red is exactly the
 comparison a red-green deficient viewer cannot make, and panic against person detection is the
 one distinction that has to survive.
 
-The panic card needs a two second press and hold. A panic button a stray thumb can fire
-destroys trust in the whole network.
+### Automations
 
----
-
-## Entities
-
-**For this property**
-
-| Entity | Purpose |
-|---|---|
-| `sensor.*_status` | What this property is publishing right now |
-| `binary_sensor.*_hood_link` | Whether the relay connection is up |
-| `button.*_panic` | Raise a panic |
-| `button.*_clear` | Clear a latched panic or lingering alert |
-| `switch.*_publish_status` | Privacy kill switch. Off disconnects entirely. |
-
-**For each neighbouring property**, grouped as its own device:
-
-| Entity | Purpose |
-|---|---|
-| `sensor.*_status` | The five state roll-up. Drives the tile. |
-| `binary_sensor.*_alarm` | On for alert or panic |
-| `binary_sensor.*_panic` | On for panic only |
-| `binary_sensor.*_online` | On while reachable |
-
----
-
-## Automations
-
-Neighbourhood Watch raises the message and stops there. It ships no opinion about what should
-happen next, because a property with a baby asleep and a property with a shift worker want
-different things.
-
-Every remote state change fires an event:
+The integration raises the message and stops there, because a house with a baby asleep and a
+house with a shift worker want different things.
 
 ```yaml
 event_type: neighbourhood_watch_status_changed
@@ -287,95 +260,64 @@ actions:
           sound: {name: default, critical: 1, volume: 1.0}
 ```
 
-There are three worked examples in [`blueprints/`](blueprints/automation/neighbourhood_watch):
-a plain push, an overnight critical wake-up, and one for a property that goes offline while it
-was armed. They are examples to copy, not defaults that get installed.
+Three worked examples live in [`blueprints/`](blueprints/automation/neighbourhood_watch): a
+plain push, an overnight critical wake-up, and one for a property that goes offline while it was
+armed. They are examples to copy, not defaults that get installed.
 
 That last one is worth setting up. Power or internet cut at an armed house is a signal in its
 own right, and it is the one thing a camera cannot tell you.
 
-There are also two services, `neighbourhood_watch.panic` and `neighbourhood_watch.clear`, if you
-would rather trigger a panic from a physical button or a voice assistant than from the card.
-
----
+There are also two services, `neighbourhood_watch.panic` and `neighbourhood_watch.clear`, for
+triggering a panic from a physical button or a voice assistant.
 
 ## Privacy and security
 
 **What leaves your property:** a display name, an icon, an optional picture URL, one of four
-state words, an optional short label saying which sensor fired, and a timestamp. That is all.
+state words, an optional short label saying which sensor fired, and a timestamp.
 
 **What never leaves:** camera images and streams, entity ids, individual entity states,
 `person` and `device_tracker` entities, GPS, occupancy, or anything about who is home. If a
-trigger sensor has no friendly name, the label published is the generic word "alert" rather
-than its entity id.
+trigger sensor has no friendly name, the label published is the generic word "alert" rather than
+its entity id.
 
-One thing to avoid: do not put an internal Home Assistant URL in the tile picture field. It is
-published to the neighbourhood and fetched by every neighbour's browser. Only `https://` URLs
-are accepted, on both the publishing and the receiving side, which rules out a
-`/api/camera_proxy/...` link, but it is worth understanding why that restriction is there.
-
-If you would rather neighbours not know which camera fired, turn off "share which sensor fired"
-and they see only that an alert happened. If you want out entirely for a while, turn off the
-publish switch and the neighbourhood sees you go offline.
+Do not put an internal Home Assistant URL in the tile picture field. Only `https://` URLs are
+accepted, on both ends, which rules out a `/api/camera_proxy/...` link, but it is worth
+understanding why that restriction is there.
 
 **On the security side:**
 
-- Nobody ever hands out a Home Assistant token. A property's credential works only against the
-  relay and only as that property.
-- The relay stamps identity from the authenticated token and ignores whatever a client claims,
-  so no property can publish as another.
-- Tokens are per property and revocable in isolation. Revoking one closes its connection
-  immediately and touches nobody else.
-- Join codes can carry an expiry, and `--rotate` kills the previous token on the spot.
-- Everything is TLS, and the integration refuses a join code that points at a plaintext
-  `ws://` relay.
-- **The relay cannot call services or read your entities.** Nothing it sends can operate a
-  device at your property by itself.
+- Nobody ever hands out a Home Assistant token. A property's credential works only against the relay and only as that property.
+- The relay stamps identity from the authenticated token and ignores whatever a client claims, so no property can publish as another.
+- Join codes bind to the first install that uses them, carry an optional expiry, and `--rotate` kills the previous token on the spot.
+- Tokens are stored only as hashes. A relay operator reading the database still cannot connect as a property.
+- Everything is TLS, and the integration refuses a join code pointing at a plaintext `ws://` relay.
+- **The relay cannot call services or read your entities.** Nothing it sends can operate a device at your property by itself.
 
-Be clear about what that last point does not say. The neighbourhood does reach your Home
-Assistant as *data*: it creates a device and entities for each property, its status fires events
-on your bus, and a picture URL is fetched by your browser when you open the dashboard. If you
-write an automation that acts on those events, which is the entire point, then a neighbour's
-state does change things at your place. That is intended. It just is not the same as "no path
-in".
+Two things to understand before deploying:
 
-**Two things worth knowing before you deploy:**
-
-- **The relay operator is fully trusted.** Whoever holds the admin token can add or remove
-  properties, fabricate any property's state including panic, rename anyone, and watch the whole
-  neighbourhood's armed and disarmed rhythm over time. The protocol cannot prevent this. Pick
-  the operator accordingly.
-- **A hostile or malfunctioning property is only partly contained.** The relay caps how often a
-  property may enter panic (six times an hour), meters every frame, and limits concurrent
-  connections, so one property cannot flood the others or wake the valley on a loop. But there
-  is currently **no per-property mute**: if a neighbour becomes a nuisance, the only remedy is
-  the hood owner revoking them. That is a known gap.
-
----
+- **The relay operator is fully trusted.** Whoever holds the admin token can add or remove properties, fabricate any property's state including panic, and watch the neighbourhood's armed and disarmed rhythm over time. The protocol cannot prevent this. Pick the operator accordingly.
+- **A hostile or malfunctioning property is only partly contained.** The relay caps panic entries at six an hour, meters every frame and limits concurrent connections, so one property cannot flood the others. But there is **no per-property mute** yet: if a neighbour becomes a nuisance, the only remedy is the hood owner revoking them.
 
 ## Troubleshooting
 
-**Tiles are empty.** Check `binary_sensor.*_hood_link`. If it is off, the relay is unreachable
-or the token was revoked. `./tools/nw-hood list` from the owner's machine shows what the relay
-thinks.
+**Tiles are empty.** Check `binary_sensor.*_hood_link`. Off means the relay is unreachable or
+the token was revoked. `./tools/nw-hood list` shows what the relay thinks.
 
 **A property shows offline but is clearly fine.** The grace window may be too short for a flaky
 link. Try `./tools/nw-hood grace 120`.
 
 **Alerts fire for nothing.** Raise the alert hold. Cameras produce split second false positives
-constantly and six seconds is a floor, not a ceiling.
+constantly, and six seconds is a floor, not a ceiling.
 
 **"Credential rejected" repair notice.** The owner revoked or rotated this property. Ask for a
 new join code; Home Assistant will prompt you to re-enter it.
 
 **"Invalid or revoked token" but the code is new.** A join code binds to the first install that
-uses it. If you paste one that has already been used on another machine, it is refused. Ask for
-a fresh code with `--rotate`.
+uses it. If it has already been used elsewhere it is refused. Ask for a fresh code with
+`--rotate`.
 
 **Cards do not render after an update.** Hard refresh the browser. The resource URL carries the
-version, so a normal reload usually picks it up, but a service worker can hold the old copy.
-
----
+version, but a service worker can hold the old copy.
 
 ## Development
 
@@ -389,6 +331,11 @@ cd relay && npm install && npx wrangler dev
 The wire protocol is documented in [`docs/PROTOCOL.md`](docs/PROTOCOL.md), so the relay can be
 reimplemented on your own server if you would rather not depend on Cloudflare.
 
-## Licence
+## Contributing
 
-MIT.
+Issues and pull requests welcome at
+[ClermontDigital/neighbourhood-watch](https://github.com/ClermontDigital/neighbourhood-watch).
+
+## License
+
+MIT. See [LICENSE](LICENSE).

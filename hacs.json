@@ -1,7 +1,24 @@
 {
   "name": "Neighbourhood Watch",
-  "content_in_root": false,
   "render_readme": true,
+  "domains": [
+    "neighbourhood_watch"
+  ],
   "homeassistant": "2026.5.0",
+  "iot_class": "Cloud Push",
+  "description": "Link separate Home Assistant deployments into a neighbourhood watch: armed, person detected, panic and offline status shared between properties, and nothing else",
+  "authors": [
+    "@ClermontDigital"
+  ],
+  "topics": [
+    "security",
+    "alarm",
+    "camera",
+    "neighbourhood",
+    "lovelace",
+    "ui",
+    "websocket"
+  ],
+  "content_in_root": false,
   "zip_release": false
 }

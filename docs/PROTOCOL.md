@@ -130,7 +130,7 @@ POST /hood/<hood>/admin/properties  {}
 ```json
 {
   "v": 1,
-  "u": "wss://nw.example.com/hood/clermont/ws",
+  "u": "wss://nw.clermont.digital/hood/clermont/ws",
   "h": "clermont",
   "p": "mckays",
   "n": "McKays",

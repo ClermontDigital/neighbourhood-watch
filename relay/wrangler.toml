@@ -2,15 +2,21 @@ name = "neighbourhood-watch-relay"
 main = "src/index.js"
 compatibility_date = "2026-09-01"
 
-# Public wss:// base for this relay. Join codes are built from it, so set it to
-# whatever hostname the properties will actually dial.
+# Public wss:// base for this relay. Join codes are built from it, so it must
+# match the route below or every code points at nothing.
 [vars]
-NW_RELAY_URL = "wss://nw.example.com"
+NW_RELAY_URL = "wss://nw.clermont.digital"
 NW_LOCATION_HINT = "oc"
 # Comma separated allowlist of neighbourhood ids. Anything not listed is
 # refused before a Durable Object is created, so nobody can mint billed objects
 # by guessing paths. An empty list accepts nothing.
-NW_HOODS = "clermont-north"
+NW_HOODS = "clermont"
+
+# Deploying creates the route as well, so there is nothing to add by hand in
+# the dashboard. The zone must already be on the same Cloudflare account.
+[[routes]]
+pattern = "nw.clermont.digital/*"
+zone_name = "clermont.digital"
 
 [[durable_objects.bindings]]
 name = "HOOD"
