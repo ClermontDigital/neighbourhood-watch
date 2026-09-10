@@ -1,0 +1,87 @@
+blueprint:
+  name: Neighbourhood Watch - wake us for an overnight alert
+  description: >-
+    Critical alert overnight when a neighbouring property raises a person
+    detection, and at any hour for a panic, because a panic means a person is
+    asking for help rather than a camera making a guess.
+
+
+    Optionally turns a light on so there is something to see as well as hear.
+  domain: automation
+  source_url: https://github.com/ClermontDigital/neighbourhood-watch/blob/main/blueprints/automation/neighbourhood_watch/neighbour_night_wake.yaml
+  input:
+    notify_services:
+      name: Notify services
+      description: A list, one per phone, for example notify.mobile_app_devstev
+      selector:
+        object:
+    night_start:
+      name: Night starts
+      default: "21:00:00"
+      selector:
+        time:
+    night_end:
+      name: Night ends
+      default: "05:30:00"
+      selector:
+        time:
+    wake_light:
+      name: Light to turn on
+      description: Optional. Left empty, no light is touched.
+      default: {}
+      selector:
+        target:
+          entity:
+            domain: light
+
+mode: queued
+max: 10
+
+variables:
+  night_start: !input night_start
+  night_end: !input night_end
+  services: !input notify_services
+  wake_light: !input wake_light
+
+triggers:
+  - trigger: event
+    event_type: neighbourhood_watch_status_changed
+
+conditions:
+  - condition: template
+    value_template: >-
+      {% set s = trigger.event.data.state %}
+      {% set n = now() %}
+      {# The window wraps past midnight, so it is an or, not an and. #}
+      {% set overnight = n >= today_at(night_start) or n <= today_at(night_end) %}
+      {{ s == 'panic' or (s == 'alert' and overnight) }}
+
+actions:
+  - variables:
+      who: "{{ trigger.event.data.name }}"
+      panic: "{{ trigger.event.data.state == 'panic' }}"
+  - repeat:
+      for_each: "{{ services }}"
+      sequence:
+        - action: "{{ repeat.item }}"
+          data:
+            title: "{{ 'PANIC' if panic else 'NEIGHBOUR ALERT' }} - {{ who }}"
+            message: >-
+              {{ who }}{{ ' has raised a panic.' if panic
+              else ' has a person detection while armed.' }}
+            data:
+              push:
+                sound:
+                  name: default
+                  critical: 1
+                  volume: 1.0
+              priority: high
+              ttl: 0
+              channel: alarm_stream
+  - choose:
+      - conditions: "{{ wake_light is mapping and wake_light | length > 0 }}"
+        sequence:
+          - action: light.turn_on
+            target: !input wake_light
+            data:
+              brightness_pct: 60

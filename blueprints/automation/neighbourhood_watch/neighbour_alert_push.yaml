@@ -1,0 +1,53 @@
+blueprint:
+  name: Neighbourhood Watch - notify on a neighbour's alert
+  description: >-
+    Send a notification whenever any neighbouring property raises an alert or a
+    panic. This is the plain version: no time conditions, no critical sound.
+
+
+    Neighbourhood Watch itself ships no opinion about what an alert should do.
+    This blueprint is an example to copy and change, not a requirement.
+  domain: automation
+  source_url: https://github.com/ClermontDigital/neighbourhood-watch/blob/main/blueprints/automation/neighbourhood_watch/neighbour_alert_push.yaml
+  input:
+    notify_service:
+      name: Notify service
+      description: For example notify.mobile_app_yourphone
+      selector:
+        text:
+    include_panic:
+      name: Include panic
+      description: Panics are usually worth their own automation with a louder sound.
+      default: true
+      selector:
+        boolean:
+
+mode: queued
+max: 10
+
+# Top level so the conditions can see them. Variables declared inside actions
+# are not in scope when conditions are evaluated.
+variables:
+  include_panic: !input include_panic
+
+triggers:
+  - trigger: event
+    event_type: neighbourhood_watch_status_changed
+
+conditions:
+  - condition: template
+    value_template: >-
+      {% set s = trigger.event.data.state %}
+      {{ s == 'alert' or (s == 'panic' and include_panic) }}
+
+actions:
+  - variables:
+      who: "{{ trigger.event.data.name }}"
+      panic: "{{ trigger.event.data.state == 'panic' }}"
+      where: "{{ trigger.event.data.detail }}"
+  - action: !input notify_service
+    data:
+      title: "{{ 'PANIC' if panic else 'Person detected' }} at {{ who }}"
+      message: >-
+        {{ who }} {{ 'has raised a panic' if panic
+        else 'has a person detection while armed' }}{{ ' (' ~ where ~ ')' if where else '' }}.

@@ -1,0 +1,22 @@
+name = "neighbourhood-watch-relay"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+
+# Public wss:// base for this relay. Join codes are built from it, so set it to
+# whatever hostname the properties will actually dial.
+[vars]
+NW_RELAY_URL = "wss://nw.example.com"
+NW_LOCATION_HINT = "oc"
+
+[[durable_objects.bindings]]
+name = "HOOD"
+class_name = "Hood"
+
+# SQLite-backed Durable Objects run on the Workers free plan. Key-value backed
+# ones do not, so this must stay new_sqlite_classes.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Hood"]
+
+[observability]
+enabled = true

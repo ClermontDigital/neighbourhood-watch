@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""nw-hood: manage a Neighbourhood Watch relay.
+
+The hood owner runs this. Everyone else only ever pastes the join code it
+prints.
+
+    export NW_RELAY=https://nw.example.com
+    export NW_ADMIN_TOKEN=...          # wrangler secret put NW_ADMIN_TOKEN
+    export NW_HOOD=clermont-north
+
+    nw-hood invite mckays --name "McKays" --icon mdi:home-group
+    nw-hood list
+    nw-hood revoke mckays
+    nw-hood grace 90
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+
+
+def _env(name: str, flag: str) -> str:
+    value = os.environ.get(name)
+    if not value:
+        sys.exit(f"error: set {name} or pass {flag}")
+    return value
+
+
+def _call(args, action: str, payload: dict | None = None) -> dict:
+    base = (args.relay or _env("NW_RELAY", "--relay")).rstrip("/")
+    hood = args.hood or _env("NW_HOOD", "--hood")
+    token = args.token or _env("NW_ADMIN_TOKEN", "--token")
+
+    url = f"{base}/hood/{hood}/admin/{action}"
+    body = json.dumps(payload or {}).encode()
+    request = urllib.request.Request(
+        url,
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.loads(response.read())
+    except urllib.error.HTTPError as err:
+        detail = err.read().decode(errors="replace")
+        sys.exit(f"error: relay returned {err.code}: {detail}")
+    except urllib.error.URLError as err:
+        sys.exit(f"error: could not reach {base}: {err.reason}")
+
+
+def _print_qr(text: str) -> None:
+    """Render a QR if qrencode is around. Not worth a dependency if not."""
+    if not shutil.which("qrencode"):
+        return
+    try:
+        subprocess.run(["qrencode", "-t", "ANSIUTF8", "-m", "1", text], check=False)
+    except OSError:
+        pass
+
+
+def cmd_invite(args: argparse.Namespace) -> None:
+    payload = {
+        "id": args.property_id,
+        "name": args.name or args.property_id,
+        "icon": args.icon,
+        "picture": args.picture,
+        "rotate": args.rotate,
+    }
+    if args.expires_in:
+        payload["expires_in"] = args.expires_in
+
+    result = _call(args, "invite", payload)
+    code = result["join_code"]
+
+    print()
+    print(f"  Property : {result['property_id']}  ({result['name']})")
+    if result.get("expires"):
+        when = datetime.fromtimestamp(result["expires"], tz=timezone.utc).astimezone()
+        print(f"  Expires  : {when:%Y-%m-%d %H:%M %Z}")
+    print()
+    print("  Join code, paste this into their Home Assistant:")
+    print()
+    print(f"  {code}")
+    print()
+    _print_qr(code)
+    print("  Settings > Devices & services > Add integration > Neighbourhood Watch")
+    print()
+
+
+def cmd_revoke(args: argparse.Namespace) -> None:
+    result = _call(args, "revoke", {"id": args.property_id})
+    print(f"revoked {result['revoked']}: its connection is closed and its token is dead")
+
+
+def cmd_grace(args: argparse.Namespace) -> None:
+    result = _call(args, "grace", {"seconds": args.seconds})
+    print(f"offline grace window set to {result['grace']}s")
+
+
+def cmd_list(args: argparse.Namespace) -> None:
+    result = _call(args, "properties", {})
+    rows = result.get("properties", [])
+    if not rows:
+        print("no properties yet")
+        return
+
+    width = max(len(r["id"]) for r in rows)
+    print(f"{'ID'.ljust(width)}  {'STATE':9}  {'ONLINE':6}  NAME")
+    for row in sorted(rows, key=lambda r: r["id"]):
+        state = "REVOKED" if row.get("revoked") else row.get("state", "?")
+        online = "yes" if row.get("online") else "no"
+        print(f"{row['id'].ljust(width)}  {state:9}  {online:6}  {row.get('name', '')}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(prog="nw-hood", description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--relay", help="https base URL of the relay (env NW_RELAY)")
+    parser.add_argument("--hood", help="hood id (env NW_HOOD)")
+    parser.add_argument("--token", help="admin token (env NW_ADMIN_TOKEN)")
+
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    invite = sub.add_parser("invite", help="create or reissue a property's join code")
+    invite.add_argument("property_id")
+    invite.add_argument("--name")
+    invite.add_argument("--icon", default="mdi:home")
+    invite.add_argument("--picture", help="URL of a photo for the tile")
+    invite.add_argument("--expires-in", type=int, dest="expires_in",
+                        help="seconds until the code stops working")
+    invite.add_argument("--rotate", action="store_true",
+                        help="reissue for a property that already exists, killing the old token")
+    invite.set_defaults(func=cmd_invite)
+
+    revoke = sub.add_parser("revoke", help="cut a property off immediately")
+    revoke.add_argument("property_id")
+    revoke.set_defaults(func=cmd_revoke)
+
+    grace = sub.add_parser("grace", help="seconds offline before a property reads as offline")
+    grace.add_argument("seconds", type=int)
+    grace.set_defaults(func=cmd_grace)
+
+    listing = sub.add_parser("list", help="show every property and its state")
+    listing.set_defaults(func=cmd_list)
+
+    args = parser.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

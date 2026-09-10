@@ -1,0 +1,94 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Join a neighbourhood",
+        "description": "Paste the join code you were given. It contains everything needed to connect, so there is nothing else to configure.",
+        "data": {
+          "join_code": "Join code"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Rejoin the neighbourhood",
+        "description": "This property's credential was revoked or rotated. Paste the new join code.",
+        "data": {
+          "join_code": "Join code"
+        }
+      }
+    },
+    "error": {
+      "invalid_join_code": "That join code could not be used: {reason}",
+      "wrong_property": "That join code is for a different property."
+    },
+    "abort": {
+      "already_configured": "This property is already connected to that neighbourhood.",
+      "reauth_successful": "Reconnected to the neighbourhood."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "What this property publishes",
+        "description": "Neighbourhood Watch does not arm anything itself. Point it at the entities you already use, and it publishes the roll-up.",
+        "data": {
+          "armed_entity": "Armed entity",
+          "trigger_entities": "Alert triggers",
+          "alert_hold": "Alert hold",
+          "alert_linger": "Alert linger",
+          "share_detail": "Share which sensor fired",
+          "icon": "Tile icon",
+          "picture": "Tile picture URL"
+        },
+        "data_description": {
+          "armed_entity": "The entity that says this property is armed, for example your night watch input boolean or alarm panel.",
+          "trigger_entities": "Person detection sensors that should raise an alert while armed.",
+          "alert_hold": "How long a trigger must stay on before it counts. Filters out the split second false positives cameras produce.",
+          "alert_linger": "How long an alert keeps showing after the last detection, so someone waking up later still sees it.",
+          "share_detail": "Whether neighbours see which camera fired, or only that an alert happened.",
+          "picture": "Optional photo for this property's tile. An icon is used if empty."
+        }
+      }
+    }
+  },
+  "issues": {
+    "rejected": {
+      "title": "Neighbourhood Watch credential rejected",
+      "description": "The relay rejected this property ({reason}). Ask the neighbourhood owner for a new join code, then reconfigure the integration."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "property_status": { "name": "Status" },
+      "self_status": { "name": "Status" }
+    },
+    "binary_sensor": {
+      "property_alarm": { "name": "Alarm" },
+      "property_panic": { "name": "Panic" },
+      "property_online": { "name": "Online" },
+      "link": { "name": "Hood link" }
+    },
+    "button": {
+      "panic": { "name": "Panic" },
+      "clear": { "name": "Clear" }
+    },
+    "switch": {
+      "publish": { "name": "Publish status" }
+    }
+  },
+  "services": {
+    "panic": {
+      "name": "Panic",
+      "description": "Raise a panic across the neighbourhood.",
+      "fields": {
+        "entry_id": { "name": "Hood", "description": "Which neighbourhood to raise. Leave empty for all." }
+      }
+    },
+    "clear": {
+      "name": "Clear",
+      "description": "Clear a latched panic and any lingering alert.",
+      "fields": {
+        "entry_id": { "name": "Hood", "description": "Which neighbourhood to clear. Leave empty for all." }
+      }
+    }
+  }
+}

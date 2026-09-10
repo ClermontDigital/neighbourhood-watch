@@ -1,0 +1,26 @@
+panic:
+  name: Panic
+  description: >-
+    Raise a panic across the neighbourhood. Fires regardless of whether this
+    property is armed, day or night, and latches until cleared.
+  fields:
+    entry_id:
+      name: Hood
+      description: Which neighbourhood to raise. Leave empty for all of them.
+      required: false
+      example: 01JABCDEF0123456789
+      selector:
+        text:
+
+clear:
+  name: Clear
+  description: >-
+    Clear a latched panic and any lingering alert on this property.
+  fields:
+    entry_id:
+      name: Hood
+      description: Which neighbourhood to clear. Leave empty for all of them.
+      required: false
+      example: 01JABCDEF0123456789
+      selector:
+        text:

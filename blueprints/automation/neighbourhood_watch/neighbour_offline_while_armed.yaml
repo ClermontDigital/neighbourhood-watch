@@ -1,0 +1,48 @@
+blueprint:
+  name: Neighbourhood Watch - a property went dark
+  description: >-
+    Notify when a neighbouring property has been offline for a while.
+
+
+    Worth having. Power or internet cut at an armed house is a signal in its
+    own right, and it is the one thing a camera cannot tell you.
+  domain: automation
+  source_url: https://github.com/ClermontDigital/neighbourhood-watch/blob/main/blueprints/automation/neighbourhood_watch/neighbour_offline_while_armed.yaml
+  input:
+    online_sensors:
+      name: Neighbour online sensors
+      description: The Online entities for the properties to watch.
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain: binary_sensor
+              device_class: connectivity
+    grace:
+      name: Offline for
+      description: How long it must stay offline before this fires.
+      default:
+        minutes: 15
+      selector:
+        duration:
+    notify_service:
+      name: Notify service
+      selector:
+        text:
+
+mode: queued
+max: 10
+
+triggers:
+  - trigger: state
+    entity_id: !input online_sensors
+    to: "off"
+    for: !input grace
+
+actions:
+  - action: !input notify_service
+    data:
+      title: "Neighbour offline"
+      message: >-
+        {{ trigger.to_state.attributes.friendly_name }} has been unreachable
+        since {{ trigger.to_state.last_changed.astimezone().strftime('%H:%M') }}.
