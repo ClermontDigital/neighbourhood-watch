@@ -9,6 +9,17 @@ npx wrangler deploy                                # live
 openssl rand -base64 32 | npx wrangler secret put NW_ADMIN_TOKEN
 ```
 
+To exercise it end to end, put `NW_ADMIN_TOKEN = "test-admin-token"` in `.dev.vars`, run
+`npx wrangler dev --port 8799 --local`, then in another shell:
+
+```bash
+npm run smoke
+```
+
+That covers the parts that are hard to reason about by reading: the grace window before a
+property reads as offline, identity stamping, join code binding, the panic cap and revocation.
+It takes about 40 seconds, most of it waiting out a deliberately shortened grace window.
+
 Set `NW_RELAY_URL` in `wrangler.toml` to the public `wss://` hostname before issuing any join
 codes: the codes are built from it, and a code pointing at the wrong host is useless.
 
