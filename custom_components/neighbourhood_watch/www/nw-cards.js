@@ -269,10 +269,14 @@ const BANNER_STYLES = `
 `;
 
 class NWBanner extends NWBaseCard {
-  constructor() {
-    super();
-    // Start hidden so a normal night never flashes an empty bar.
-    this.hidden = true;
+  setConfig(config) {
+    // Start hidden so a normal night never flashes an empty bar. This has to
+    // happen here, not in the constructor: a custom element constructor must
+    // not add attributes, and setting hidden there adds one, so
+    // document.createElement throws and Home Assistant shows "Configuration
+    // error" in place of the card.
+    if (!this._rendered) this.hidden = true;
+    super.setConfig(config);
   }
 
   /**
@@ -312,6 +316,7 @@ class NWBanner extends NWBaseCard {
       return;
     }
     this._setHidden(false);
+    this._rendered = true;
 
     const top = urgent[0];
     const meta = stateMeta(top.state);
