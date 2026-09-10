@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![HACS Badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/custom-components/hacs)
-[![Version](https://img.shields.io/badge/version-0.1.0-green.svg)](https://github.com/ClermontDigital/neighbourhood-watch)
+[![Version](https://img.shields.io/badge/version-0.1.1-green.svg)](https://github.com/ClermontDigital/neighbourhood-watch)
 
 Link separate Home Assistant deployments into a neighbourhood watch. Each property runs its own
 instance and sees all the others: armed, disarmed, person detected, panic, or offline. It shares

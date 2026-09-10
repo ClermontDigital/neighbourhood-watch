@@ -10,6 +10,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.loader import async_get_integration
 
 from homeassistant.helpers.device_registry import DeviceEntry
 
@@ -140,20 +141,11 @@ async def _async_register_frontend(hass: HomeAssistant) -> None:
         ]
     )
 
-    version = _integration_version(hass)
+    integration = await async_get_integration(hass, DOMAIN)
+    version = integration.version or "0"
     for script in FRONTEND_SCRIPTS:
         url = f"{FRONTEND_URL_BASE}/{script}?v={version}"
         await _async_add_module(hass, url)
-
-
-def _integration_version(hass: HomeAssistant) -> str:
-    try:
-        import json
-
-        manifest = Path(__file__).parent / "manifest.json"
-        return json.loads(manifest.read_text(encoding="utf-8")).get("version", "0")
-    except (OSError, ValueError):  # pragma: no cover - defensive
-        return "0"
 
 
 async def _async_add_module(hass: HomeAssistant, url: str) -> None:

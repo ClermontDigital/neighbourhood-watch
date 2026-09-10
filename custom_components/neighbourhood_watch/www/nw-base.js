@@ -7,7 +7,7 @@
  * safety property, not a cosmetic one.
  */
 
-export const NW_VERSION = "0.1.0";
+export const NW_VERSION = "0.1.1";
 
 /**
  * The state language. Colour is never the only signal: roughly eight percent
