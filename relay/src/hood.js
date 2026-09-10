@@ -88,6 +88,10 @@ export class Hood extends DurableObject {
     `);
   }
 
+  #debug(...args) {
+    if (this.env && this.env.NW_DEBUG) console.log("[hood]", ...args);
+  }
+
   #grace() {
     const row = this.sql.exec("SELECT value FROM meta WHERE key = 'grace'").toArray()[0];
     return row ? Number(row.value) : DEFAULT_GRACE_SECONDS;
@@ -364,6 +368,8 @@ export class Hood extends DurableObject {
   async #onDisconnect(ws) {
     const { propertyId } = ws.deserializeAttachment() || {};
     if (!propertyId) return;
+    this.#debug("disconnect", propertyId, "readyState", ws.readyState,
+      "tagged", this.ctx.getWebSockets(propertyId).map((s) => `${s === ws ? "self" : "other"}:${s.readyState}`).join(","));
 
     // Another socket may still be live for this property, for example during a
     // reconnect that overlapped. Only start the grace clock when the last one
@@ -376,6 +382,7 @@ export class Hood extends DurableObject {
 
   async #markGone(propertyId) {
     const now = nowSeconds();
+    this.#debug("markGone", propertyId, "at", now, "grace", this.#grace());
     this.sql.exec(
       `UPDATE status SET disconnected_at = COALESCE(disconnected_at, ?), last_seen = ?
        WHERE id = ?`,
@@ -384,8 +391,10 @@ export class Hood extends DurableObject {
       propertyId
     );
     // Do not broadcast offline yet. That is what the grace window is for: a
-    // fifteen second Starlink blip must not light up the whole street.
-    await this.#scheduleSweep();
+    // fifteen second Starlink blip must not light up the whole street. Wake
+    // exactly when the window closes rather than on a fixed poll, so offline
+    // is announced on time and the object is not woken early for nothing.
+    await this.#scheduleSweep(this.#grace() + 1);
   }
 
   // ------------------------------------------------------------------
@@ -395,13 +404,19 @@ export class Hood extends DurableObject {
   async #scheduleSweep(delaySeconds = SWEEP_INTERVAL_SECONDS) {
     const target = Date.now() + delaySeconds * 1000;
     const existing = await this.ctx.storage.getAlarm();
-    if (existing !== null && existing <= target) return;
+    this.#debug("scheduleSweep +" + delaySeconds + "s", "existing", existing === null ? "none" : `+${Math.round((existing - Date.now()) / 1000)}s`);
+    // Only defer to an existing alarm that is genuinely still ahead of us. A
+    // stored alarm in the past is stale (it fired and failed, or never ran),
+    // and trusting it as "already scheduled sooner" meant no sweep was ever
+    // set again, so a departed property never got its offline broadcast.
+    if (existing !== null && existing > Date.now() && existing <= target) return;
     await this.ctx.storage.setAlarm(target);
   }
 
   async alarm() {
     const grace = this.#grace();
     const now = nowSeconds();
+    this.#debug("alarm at", now, "sockets", this.ctx.getWebSockets().length);
 
     // 1. Reap sockets that have gone quiet. A satellite link can black-hole a
     //    connection without ever closing it, so a socket sitting in
@@ -446,6 +461,7 @@ export class Hood extends DurableObject {
       }
 
       const due = goneAt + grace;
+      this.#debug("sweep", row.id, "state", row.state, "goneAt", goneAt, "due", due, "now", now);
       if (now >= due) {
         this.sql.exec(
           "UPDATE status SET state = 'offline', detail = NULL, since = ? WHERE id = ?",
@@ -670,6 +686,11 @@ export class Hood extends DurableObject {
       now,
       expires
     );
+    // disconnected_at of 0 means "never connected", which is already past any
+    // grace window. Stamping it with now instead put a freshly invited property
+    // inside the grace window, so it was broadcast as disarmed and online to
+    // everyone, and the sweep then skipped it because its stored state already
+    // read offline. It stayed that way until the property first connected.
     this.sql.exec(
       `INSERT INTO status (id, state, detail, since, last_seen, disconnected_at)
        VALUES (?, 'offline', NULL, ?, ?, ?)
@@ -677,7 +698,7 @@ export class Hood extends DurableObject {
       id,
       now,
       now,
-      now
+      0
     );
 
     // Rotating a token must kick the old socket, otherwise the previous

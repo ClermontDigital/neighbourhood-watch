@@ -38,7 +38,17 @@ const TILE_STYLES = `
     touch-action: manipulation;
     transition: transform .12s ease;
   }
+  .tile { position: relative; }
   .tile:hover { transform: translateY(-2px); }
+  /* A chip rather than "(you)" appended to the name, which truncated on any
+     tile narrower than the name. */
+  .you {
+    position: absolute; top: 7px; left: 7px;
+    font-size: 9px; font-weight: 700; letter-spacing: .1em;
+    padding: 2px 6px; border-radius: 999px;
+    color: var(--tile-colour);
+    background: color-mix(in srgb, var(--tile-colour) 16%, transparent);
+  }
   .tile:focus-visible { outline: 2px solid var(--tile-colour); outline-offset: 2px; }
   .avatar {
     width: 56px; height: 56px; border-radius: 50%;
@@ -107,10 +117,11 @@ function tileMarkup(prop) {
 
   const detail = prop.detail ? ` &middot; ${escapeHtml(prop.detail)}` : "";
   return `
-    <div class="tile ${token}" style="--tile-colour:${colour}"
+    <div class="tile ${token}${prop.is_self ? " self" : ""}" style="--tile-colour:${colour}"
          tabindex="0" role="button"
          aria-label="${escapeHtml(prop.name)}, ${meta.label}"
          data-entity="${escapeHtml(prop.entity_id)}">
+      ${prop.is_self ? `<span class="you">YOU</span>` : ""}
       <div style="position:relative">${avatar}${badge}</div>
       <div class="name">${escapeHtml(prop.name)}</div>
       <div class="status">${meta.label}</div>
@@ -153,6 +164,10 @@ class NWCard extends NWBaseCard {
     return { title: "Neighbourhood" };
   }
 
+  getGridOptions() {
+    return { columns: "full", rows: "auto", min_columns: 6 };
+  }
+
   render() {
     const collected = collectProperties(this.hass);
     const self = collectSelf(this.hass);
@@ -161,7 +176,7 @@ class NWCard extends NWBaseCard {
       // neighbour in PANIC to second place, which breaks the whole point.
       collected.push({
         ...self,
-        name: `${self.name} (you)`,
+        is_self: true,
         icon: "mdi:home-heart",
         picture: null,
       });
@@ -197,6 +212,10 @@ class NWCard extends NWBaseCard {
 /* ------------------------------------------------------------------ */
 
 class NWTile extends NWBaseCard {
+  getGridOptions() {
+    return { columns: 3, rows: "auto", min_columns: 3 };
+  }
+
   static getStubConfig(hass) {
     const first = collectProperties(hass)[0];
     return { property: first ? first.id : "" };
@@ -250,6 +269,36 @@ const BANNER_STYLES = `
 `;
 
 class NWBanner extends NWBaseCard {
+  constructor() {
+    super();
+    // Start hidden so a normal night never flashes an empty bar.
+    this.hidden = true;
+  }
+
+  /**
+   * Hide the card element itself, not just its contents.
+   *
+   * In a sections view Home Assistant only drops a card's grid slot when the
+   * card element carries [hidden] and says so with card-visibility-changed.
+   * Setting display:none from inside, as this used to, left an empty cell the
+   * size of a card at the top of the page.
+   */
+  _setHidden(hidden) {
+    if (this.hidden === hidden) return;
+    this.hidden = hidden;
+    this.dispatchEvent(
+      new CustomEvent("card-visibility-changed", {
+        detail: { value: !hidden },
+        bubbles: true,
+        composed: true,
+      })
+    );
+  }
+
+  getGridOptions() {
+    return { columns: "full", rows: "auto" };
+  }
+
   render() {
     const urgent = sortProperties(
       collectProperties(this.hass).filter((p) => stateMeta(p.state).urgent)
@@ -259,10 +308,10 @@ class NWBanner extends NWBaseCard {
     // property without cluttering anything on a normal night.
     if (!urgent.length) {
       this.shadowRoot.innerHTML = "";
-      this.style.display = "none";
+      this._setHidden(true);
       return;
     }
-    this.style.display = "block";
+    this._setHidden(false);
 
     const top = urgent[0];
     const meta = stateMeta(top.state);
@@ -295,6 +344,8 @@ class NWBanner extends NWBaseCard {
 /* ------------------------------------------------------------------ */
 
 const PANIC_STYLES = `
+  :host { height: 100%; }
+  .nw-card { height: 100%; box-sizing: border-box; }
   .panic {
     position: relative; width: 100%; border: none; cursor: pointer;
     padding: 22px; border-radius: var(--nw-radius);
@@ -322,6 +373,10 @@ const PANIC_STYLES = `
 `;
 
 class NWPanic extends NWBaseCard {
+  getGridOptions() {
+    return { columns: 6, rows: "auto", min_columns: 4 };
+  }
+
   constructor() {
     super();
     this._holdMs = 2000;
@@ -437,7 +492,9 @@ class NWPanic extends NWBaseCard {
 /* ------------------------------------------------------------------ */
 
 const SELF_STYLES = `
-  .self { display: flex; align-items: center; gap: 14px; padding: 16px; }
+  :host { height: 100%; }
+  .nw-card { height: 100%; box-sizing: border-box; display: flex; align-items: center; }
+  .self { flex: 1; display: flex; align-items: center; gap: 14px; padding: 16px; }
   .dot { width: 42px; height: 42px; border-radius: 50%; flex: none;
          display: grid; place-items: center; color: #fff; background: var(--tile-colour); }
   .dot ha-icon { --mdc-icon-size: 22px; }
@@ -449,6 +506,10 @@ const SELF_STYLES = `
 `;
 
 class NWSelf extends NWBaseCard {
+  getGridOptions() {
+    return { columns: 6, rows: "auto", min_columns: 4 };
+  }
+
   render() {
     const self = collectSelf(this.hass);
     if (!self) {
@@ -499,6 +560,10 @@ const LOG_STYLES = `
 `;
 
 class NWLog extends NWBaseCard {
+  getGridOptions() {
+    return { columns: "full", rows: "auto", min_columns: 6 };
+  }
+
   constructor() {
     super();
     this._events = [];

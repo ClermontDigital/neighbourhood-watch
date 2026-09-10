@@ -69,6 +69,13 @@ const alphaJoin = decode(alphaInv.body.join_code);
 const bravoJoin = decode(bravoInv.body.join_code);
 ok(alphaJoin.u.startsWith("wss://nw.clermont.digital/hood/clermont/ws"), "join code carries the configured relay URL");
 
+const freshId = `fresh-${Date.now() % 1000000}`;
+await admin("invite", { id: freshId, name: "Never Connected" });
+const fresh = (await admin("properties")).body.properties.find(p => p.id === freshId);
+ok(fresh && fresh.state === "offline" && fresh.online === false,
+   `an invited property that has never connected reads offline (${fresh?.state}, online=${fresh?.online})`);
+await admin("revoke", { id: freshId });
+
 console.log("\n== connect ==");
 const alpha = await connect(alphaJoin, "alpha-install-1");
 const bravo = await connect(bravoJoin, "bravo-install-1");
@@ -120,7 +127,13 @@ alpha.terminate();
 await sleep(3000);
 ok(!seen(bravo, "update").some(u => u.property.state === "offline"), "no offline inside the grace window");
 await sleep(30000);
-ok(seen(bravo, "update").some(u => u.property.state === "offline"), "offline once the grace window expires");
+const wentOffline = seen(bravo, "update").some(u => u.property.state === "offline");
+ok(wentOffline, "offline once the grace window expires");
+if (!wentOffline) {
+  const view = (await admin("properties")).body.properties.find(p => p.id === "alpha");
+  console.log("    relay's view of alpha:", JSON.stringify(view));
+  console.log("    updates bravo saw:", seen(bravo, "update").map(u => `${u.property.id}=${u.property.state}`).join(", "));
+}
 
 console.log("\n== revoke ==");
 const closed = new Promise(res => bravo.on("close", c => res(c)));
