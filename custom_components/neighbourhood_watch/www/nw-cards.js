@@ -275,8 +275,28 @@ class NWBanner extends NWBaseCard {
     // not add attributes, and setting hidden there adds one, so
     // document.createElement throws and Home Assistant shows "Configuration
     // error" in place of the card.
-    if (!this._rendered) this.hidden = true;
+    if (this._urgent === undefined) this.hidden = true;
     super.setConfig(config);
+  }
+
+  /**
+   * Decide visibility here, not in render().
+   *
+   * When a card element is hidden, Home Assistant detaches it from the DOM.
+   * render() only runs while connected, so a banner that hid itself from
+   * render() could never run again to un-hide: it stayed gone even with a
+   * neighbour in panic. The hass setter still runs on a detached element, so
+   * this is where the decision has to live.
+   */
+  set hass(hass) {
+    super.hass = hass;
+    const urgent = collectProperties(hass).some((p) => stateMeta(p.state).urgent);
+    this._urgent = urgent;
+    this._setHidden(!urgent);
+  }
+
+  get hass() {
+    return super.hass;
   }
 
   /**
@@ -312,11 +332,8 @@ class NWBanner extends NWBaseCard {
     // property without cluttering anything on a normal night.
     if (!urgent.length) {
       this.shadowRoot.innerHTML = "";
-      this._setHidden(true);
       return;
     }
-    this._setHidden(false);
-    this._rendered = true;
 
     const top = urgent[0];
     const meta = stateMeta(top.state);
@@ -336,7 +353,7 @@ class NWBanner extends NWBaseCard {
       </div>`;
 
     const el = this.shadowRoot.querySelector(".banner");
-    el.addEventListener("click", () => this.moreInfo(top.entity_id));
+    if (el) el.addEventListener("click", () => this.moreInfo(top.entity_id));
   }
 
   getCardSize() {
