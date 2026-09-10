@@ -42,8 +42,9 @@ nothing needs a port forward, and the relay can only ever see the statuses it is
                     +-----------------+
 ```
 
-The relay holds the roster, who is connected, and each property's current state. It never
-initiates anything, and it stores nothing about a property except a display name and a status.
+The relay holds the roster and, for each property, its display name, icon, optional picture,
+current state, the optional short label saying which sensor fired, and connection timestamps.
+It never initiates anything and it cannot reach into any property.
 
 Each property publishes one of four states. The relay derives a fifth.
 
@@ -76,7 +77,10 @@ npm install
 Point it at your own hostname and deploy:
 
 ```bash
-# edit wrangler.toml and set NW_RELAY_URL to your wss:// hostname
+# edit wrangler.toml: set NW_RELAY_URL to your wss:// hostname, and put your
+# neighbourhood's id in NW_HOODS. Anything not in that allowlist is refused
+# before a Durable Object is created, so nobody can run up your bill by
+# guessing paths.
 npx wrangler deploy
 
 # an admin token, known only to you, that gates invites and revocations
@@ -115,8 +119,15 @@ That prints a join code, and a QR if `qrencode` is installed:
 ```
 
 The code carries the relay URL, the property id, and a token that belongs to that property
-alone. Send it however you like: it is safe over a message because it only works for that one
-property and can be killed at any time.
+alone.
+
+**Treat a join code like a password until it has been used.** It is a live credential, and
+anyone holding an unused one can connect as that property: they would see the whole
+neighbourhood's roster and states, and could publish false states including panic. Once the
+property connects for the first time, the relay binds the code to that install, and the code is
+useless to anyone else. So send it over whatever channel you like, but if it sits unused for a
+week, reissue it with `--rotate` rather than assuming nobody else saw it. Codes for someone who
+will not set up straight away are worth an `--expires-in`.
 
 Other commands:
 
@@ -293,8 +304,15 @@ would rather trigger a panic from a physical button or a voice assistant than fr
 **What leaves your property:** a display name, an icon, an optional picture URL, one of four
 state words, an optional short label saying which sensor fired, and a timestamp. That is all.
 
-**What never leaves:** camera images and streams, entity ids and states, `person` and
-`device_tracker` entities, GPS, occupancy, or anything about who is home.
+**What never leaves:** camera images and streams, entity ids, individual entity states,
+`person` and `device_tracker` entities, GPS, occupancy, or anything about who is home. If a
+trigger sensor has no friendly name, the label published is the generic word "alert" rather
+than its entity id.
+
+One thing to avoid: do not put an internal Home Assistant URL in the tile picture field. It is
+published to the neighbourhood and fetched by every neighbour's browser. Only `https://` URLs
+are accepted, on both the publishing and the receiving side, which rules out a
+`/api/camera_proxy/...` link, but it is worth understanding why that restriction is there.
 
 If you would rather neighbours not know which camera fired, turn off "share which sensor fired"
 and they see only that an alert happened. If you want out entirely for a while, turn off the
@@ -311,8 +329,27 @@ publish switch and the neighbourhood sees you go offline.
 - Join codes can carry an expiry, and `--rotate` kills the previous token on the spot.
 - Everything is TLS, and the integration refuses a join code that points at a plaintext
   `ws://` relay.
-- **There is no path from the neighbourhood into anyone's Home Assistant.** The relay cannot
-  call services, read entities, or send anything a property acts on automatically.
+- **The relay cannot call services or read your entities.** Nothing it sends can operate a
+  device at your property by itself.
+
+Be clear about what that last point does not say. The neighbourhood does reach your Home
+Assistant as *data*: it creates a device and entities for each property, its status fires events
+on your bus, and a picture URL is fetched by your browser when you open the dashboard. If you
+write an automation that acts on those events, which is the entire point, then a neighbour's
+state does change things at your place. That is intended. It just is not the same as "no path
+in".
+
+**Two things worth knowing before you deploy:**
+
+- **The relay operator is fully trusted.** Whoever holds the admin token can add or remove
+  properties, fabricate any property's state including panic, rename anyone, and watch the whole
+  neighbourhood's armed and disarmed rhythm over time. The protocol cannot prevent this. Pick
+  the operator accordingly.
+- **A hostile or malfunctioning property is only partly contained.** The relay caps how often a
+  property may enter panic (six times an hour), meters every frame, and limits concurrent
+  connections, so one property cannot flood the others or wake the valley on a loop. But there
+  is currently **no per-property mute**: if a neighbour becomes a nuisance, the only remedy is
+  the hood owner revoking them. That is a known gap.
 
 ---
 
@@ -329,7 +366,11 @@ link. Try `./tools/nw-hood grace 120`.
 constantly and six seconds is a floor, not a ceiling.
 
 **"Credential rejected" repair notice.** The owner revoked or rotated this property. Ask for a
-new join code and reconfigure the integration.
+new join code; Home Assistant will prompt you to re-enter it.
+
+**"Invalid or revoked token" but the code is new.** A join code binds to the first install that
+uses it. If you paste one that has already been used on another machine, it is refused. Ask for
+a fresh code with `--rotate`.
 
 **Cards do not render after an update.** Hard refresh the browser. The resource URL carries the
 version, so a normal reload usually picks it up, but a service worker can hold the old copy.

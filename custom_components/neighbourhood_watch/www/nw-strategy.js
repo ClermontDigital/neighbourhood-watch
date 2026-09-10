@@ -39,11 +39,23 @@ function buildView(config = {}) {
     icon: config.icon || "mdi:shield-home",
     // Masonry rather than sections on purpose: it behaves predictably at every
     // width without any per property tuning, which is the whole point here.
+    // Stated explicitly rather than inferred from the presence of "cards",
+    // because the frontend's final fallback for an untyped view is now
+    // sections, not masonry.
+    type: "masonry",
     cards,
   };
 }
 
-class NWDashboardStrategy extends HTMLTemplateElement {
+// HTMLElement, not HTMLTemplateElement. Home Assistant only ever reads the
+// static generate() off the registered constructor, so extending the template
+// element happened to work, but such an element can never be constructed:
+// customElements.define accepts it, then `new` throws "Illegal constructor"
+// and createElement silently yields HTMLUnknownElement.
+class NWDashboardStrategy extends HTMLElement {
+  // No configuration UI, so tell the dashboard dialog not to offer one.
+  static noEditor = true;
+
   static async generate(config, _hass) {
     return {
       title: config.dashboard_title || "Neighbourhood Watch",
@@ -52,10 +64,15 @@ class NWDashboardStrategy extends HTMLTemplateElement {
   }
 }
 
-class NWViewStrategy extends HTMLTemplateElement {
+class NWViewStrategy extends HTMLElement {
+  static noEditor = true;
+
   static async generate(config, _hass) {
     // A view strategy returns the view body only; the surrounding dashboard
     // supplies the title and icon.
+    // The dashboard supplies title, path and icon: the frontend spreads the
+    // generated view over the user's own config, so returning them here would
+    // override whatever they set in YAML.
     const view = buildView(config);
     delete view.title;
     delete view.path;

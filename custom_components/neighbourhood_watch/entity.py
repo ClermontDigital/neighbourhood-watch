@@ -6,7 +6,7 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import Entity
 
-from .const import DOMAIN, SIGNAL_LOCAL_UPDATE, SIGNAL_PROPERTY_UPDATE
+from .const import DOMAIN
 from .coordinator import NeighbourhoodWatchCoordinator
 from .models import PropertyStatus
 
@@ -16,10 +16,15 @@ class NWBaseEntity(Entity):
 
     _attr_should_poll = False
     _attr_has_entity_name = True
-    _signal = SIGNAL_PROPERTY_UPDATE
 
     def __init__(self, coordinator: NeighbourhoodWatchCoordinator) -> None:
+        super().__init__()
         self.coordinator = coordinator
+
+    @property
+    def _signal(self) -> str:
+        """Scoped to this config entry, so two hoods never cross-fire."""
+        return self.coordinator.signal_update
 
     async def async_added_to_hass(self) -> None:
         self.async_on_remove(
@@ -62,7 +67,9 @@ class NWRemoteEntity(NWBaseEntity):
 class NWLocalEntity(NWBaseEntity):
     """An entity describing this property."""
 
-    _signal = SIGNAL_LOCAL_UPDATE
+    @property
+    def _signal(self) -> str:
+        return self.coordinator.signal_local
 
     @property
     def device_info(self) -> DeviceInfo:

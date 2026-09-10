@@ -11,12 +11,15 @@ import contextlib
 import json
 import logging
 import random
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 import aiohttp
 
 from .const import (
+    HEALTHY_CONNECTION_SECONDS,
+    PING_FRAME,
     PING_INTERVAL,
     PROTOCOL_VERSION,
     RECEIVE_TIMEOUT,
@@ -43,6 +46,7 @@ class RelayClient:
         session: aiohttp.ClientSession,
         url: str,
         token: str,
+        client_id: str,
         *,
         on_snapshot: Callable[[list[dict[str, Any]]], Awaitable[None]],
         on_update: Callable[[dict[str, Any]], Awaitable[None]],
@@ -52,6 +56,7 @@ class RelayClient:
         self._session = session
         self._url = url
         self._token = token
+        self._client_id = client_id
         self._on_snapshot = on_snapshot
         self._on_update = on_update
         self._on_link = on_link
@@ -83,15 +88,36 @@ class RelayClient:
         if self._runner is None or self._runner.done():
             self._closing = False
             self._runner = asyncio.create_task(self._run())
+            self._runner.add_done_callback(self._runner_finished)
+
+    def _runner_finished(self, task: asyncio.Task[None]) -> None:
+        """Never let the connection loop die quietly.
+
+        _run calls back into Home Assistant, and a listener that raises would
+        otherwise kill this task with nothing but "Task exception was never
+        retrieved" in the log, leaving the property permanently disconnected
+        with no repair notice and no unavailable entity.
+        """
+        if task.cancelled() or self._closing:
+            return
+        err = task.exception()
+        if err is None:
+            return
+        _LOGGER.error("Relay connection loop stopped unexpectedly: %s", err, exc_info=err)
+        self._runner = None
 
     async def async_stop(self) -> None:
         self._closing = True
         await self._cancel(self._pinger)
         self._pinger = None
-        if self._ws is not None and not self._ws.closed:
-            with contextlib.suppress(Exception):
-                await self._ws.close()
+        # Cancel the reader before closing, and bound the close handshake. On a
+        # black-holed satellite link the handshake otherwise waits its full
+        # timeout inside async_unload_entry and stalls the reload.
         await self._cancel(self._runner)
+        if self._ws is not None and not self._ws.closed:
+            with contextlib.suppress(Exception, TimeoutError):
+                async with asyncio.timeout(2):
+                    await self._ws.close()
         self._runner = None
         await self._set_connected(False)
 
@@ -125,29 +151,34 @@ class RelayClient:
     async def _run(self) -> None:
         attempt = 0
         while not self._closing:
+            started = time.monotonic()
             try:
                 await self._connect_once()
-                # A clean return means the relay closed on us. Reset the
-                # backoff so a routine restart reconnects promptly.
-                attempt = 0
             except asyncio.CancelledError:
                 raise
             except RelayRejected as err:
                 _LOGGER.error("Relay rejected this property: %s", err.reason)
-                await self._set_connected(False)
+                await self._safely_disconnect()
                 await self._on_rejected(err.reason)
                 return
             except Exception as err:  # noqa: BLE001 - transport must never die
-                attempt += 1
-                _LOGGER.debug("Relay connection failed (attempt %s): %s", attempt, err)
+                _LOGGER.debug("Relay connection failed: %s", err)
+
+            # Reset the backoff on a connection that actually stayed up, not on
+            # one that merely returned without raising. A relay that accepts
+            # and immediately closes returns cleanly every time, which would
+            # otherwise pin every property in the hood at the minimum delay and
+            # produce exactly the synchronised hammering the jitter avoids.
+            if time.monotonic() - started >= HEALTHY_CONNECTION_SECONDS:
+                attempt = 0
             else:
                 attempt += 1
 
-            await self._set_connected(False)
+            await self._safely_disconnect()
             if self._closing:
                 return
 
-            delay = min(RECONNECT_MAX, RECONNECT_MIN * (2 ** min(attempt, 8)))
+            delay = min(RECONNECT_MAX, RECONNECT_MIN * (2 ** min(max(attempt - 1, 0), 8)))
             # Jitter matters here: every property in the hood reconnects at the
             # same moment after a relay restart, and a synchronised stampede
             # looks exactly like an attack.
@@ -158,8 +189,25 @@ class RelayClient:
             except asyncio.CancelledError:
                 raise
 
+    async def _safely_disconnect(self) -> None:
+        """Report the link as down without letting a listener kill the loop.
+
+        _set_connected fans out to dispatcher listeners that run inline, so one
+        entity raising during a state write would otherwise propagate out of
+        the reconnect loop and stop it for good.
+        """
+        try:
+            await self._set_connected(False)
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("Listener raised while reporting the link as down")
+
     async def _connect_once(self) -> None:
-        headers = {"Authorization": f"Bearer {self._token}"}
+        headers = {
+            "Authorization": f"Bearer {self._token}",
+            # Binds the join code to this install on first use, so a code that
+            # leaks afterwards cannot be used by anyone else.
+            "X-NW-Client": self._client_id,
+        }
         async with self._session.ws_connect(
             self._url,
             headers=headers,
@@ -168,7 +216,10 @@ class RelayClient:
             max_msg_size=64 * 1024,
         ) as ws:
             self._ws = ws
-            await self._set_connected(True)
+            try:
+                await self._set_connected(True)
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("Listener raised while reporting the link as up")
 
             if self._hello:
                 await self._send(self._hello)
@@ -236,8 +287,9 @@ class RelayClient:
 
     async def _ping_loop(self) -> None:
         # The relay auto-responds to this exact frame without waking its
-        # Durable Object, so it must stay byte for byte identical.
-        frame = json.dumps({"t": "ping"})
+        # Durable Object, so it must stay byte for byte identical. json.dumps
+        # puts a space after the colon by default, which does not match.
+        frame = PING_FRAME
         while True:
             await asyncio.sleep(PING_INTERVAL)
             ws = self._ws

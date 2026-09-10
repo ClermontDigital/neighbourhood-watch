@@ -50,13 +50,22 @@ export const NW_TOKENS = `
 
     display: block;
   }
+  /* Home Assistant's dark mode is a per-user theme setting, not an OS media
+     query, so a wall tablet on OS light with the HA dark theme would otherwise
+     get light state colours on a dark card. The attribute is set from
+     hass.themes.darkMode; the media query stays as a fallback. */
   @media (prefers-color-scheme: dark) {
-    :host {
+    :host(:not([nw-light])) {
       /* Slightly lifted so the states stay legible on a dark ground. */
       --nw-armed: #60a5fa;
       --nw-disarmed: #94a3b8;
       --nw-offline: #64748b;
     }
+  }
+  :host([nw-dark]) {
+    --nw-armed: #60a5fa;
+    --nw-disarmed: #94a3b8;
+    --nw-offline: #64748b;
   }
   .nw-card {
     background: var(--nw-surface);
@@ -92,11 +101,33 @@ export function sortProperties(list) {
 /** Compact relative time: 45s, 22m, 3h, 5d. */
 export function relTime(epochSeconds) {
   if (!epochSeconds) return "";
-  const seconds = Math.max(0, Math.floor(Date.now() / 1000 - Number(epochSeconds)));
+  const value = Number(epochSeconds);
+  // A remote property could send anything here. NaN silently rendered "NaNd".
+  if (!Number.isFinite(value)) return "";
+  const seconds = Math.max(0, Math.floor(Date.now() / 1000 - value));
   if (seconds < 60) return `${seconds}s`;
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
   if (seconds < 86400) return `${Math.floor(seconds / 3600)}h`;
   return `${Math.floor(seconds / 86400)}d`;
+}
+
+/**
+ * Only https URLs are ever used as a picture.
+ *
+ * This value comes from another household's Home Assistant and is headed for a
+ * CSS url() in this browser. escapeHtml is not enough on its own: the HTML
+ * parser decodes entities in an attribute before the CSS parser sees the
+ * string, so a &#39; becomes a real quote and closes the url().
+ */
+export function safePicture(value) {
+  if (typeof value !== "string" || !value) return null;
+  if (value.length > 256 || /["'()\\<>\s]/.test(value)) return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.hostname ? url.toString() : null;
+  } catch {
+    return null;
+  }
 }
 
 function fromEntity(entityId, state) {
@@ -108,7 +139,7 @@ function fromEntity(entityId, state) {
     state: state.state,
     detail: a.detail || null,
     icon: a.icon_hint || null,
-    picture: a.picture || null,
+    picture: safePicture(a.picture),
     since: a.since || null,
     last_seen: a.last_seen || null,
     online: a.online !== false,
@@ -148,12 +179,35 @@ export function collectSelf(hass) {
   return null;
 }
 
-/** Find a companion entity on the same integration, for example the panic button. */
-export function findEntity(hass, prefix, contains) {
+/**
+ * Find a companion entity that belongs to the same device as this property's
+ * own status sensor, for example the panic button.
+ *
+ * Matching on a substring of the entity id picked up anything that merely
+ * contained "_panic", so a user with button.kitchen_panic_light could have
+ * their panic press silently routed to a light.
+ */
+export function findCompanion(hass, domain, suffix) {
   if (!hass) return null;
+  const self = collectSelf(hass);
+  if (!self) return null;
+
+  const registry = hass.entities || {};
+  const deviceId = registry[self.entity_id] && registry[self.entity_id].device_id;
+
+  if (deviceId) {
+    for (const [entityId, entry] of Object.entries(registry)) {
+      if (!entityId.startsWith(`${domain}.`)) continue;
+      if (entry.device_id !== deviceId) continue;
+      if (entityId.endsWith(suffix)) return entityId;
+    }
+  }
+
+  // Registry not available to this user (a non-admin has a reduced hass
+  // object). Fall back to a suffix match, which is still tighter than a
+  // substring one.
   for (const entityId of Object.keys(hass.states)) {
-    if (!entityId.startsWith(prefix)) continue;
-    if (entityId.includes(contains)) return entityId;
+    if (entityId.startsWith(`${domain}.`) && entityId.endsWith(suffix)) return entityId;
   }
   return null;
 }
@@ -177,6 +231,7 @@ export class NWBaseCard extends HTMLElement {
     this._hass = null;
     this._frame = null;
     this._built = false;
+    this._signature = undefined;
     // Relative times go stale on a dashboard nobody touches, so tick them.
     this._ticker = null;
   }
@@ -184,12 +239,46 @@ export class NWBaseCard extends HTMLElement {
   setConfig(config) {
     this._config = config || {};
     this._built = false;
+    this._signature = undefined;
     this.requestRender();
   }
 
   set hass(hass) {
+    const previous = this._hass;
     this._hass = hass;
+
+    if (hass && hass.themes && previous !== hass) {
+      // Reflect the Home Assistant theme rather than the OS setting.
+      const dark = Boolean(hass.themes.darkMode);
+      this.toggleAttribute("nw-dark", dark);
+      this.toggleAttribute("nw-light", !dark);
+    }
+
+    // Home Assistant hands over a new hass object on every state change of
+    // every entity in the instance. Rebuilding the shadow DOM each time
+    // destroyed keyboard focus on the tiles, restarted the banner's pulse
+    // animation, and made text unselectable. Only render when something this
+    // card actually shows has changed.
+    const signature = this.signature();
+    if (signature !== null && signature === this._signature) return;
+    this._signature = signature;
     this.requestRender();
+  }
+
+  /**
+   * A cheap string describing everything this card displays. Return null to
+   * opt out and render on every update.
+   */
+  signature() {
+    if (!this._hass) return null;
+    const parts = [];
+    for (const p of collectProperties(this._hass)) {
+      parts.push(`${p.id}|${p.state}|${p.since}|${p.detail}|${p.picture}|${p.name}|${p.online}`);
+    }
+    const self = collectSelf(this._hass);
+    if (self) parts.push(`self|${self.state}|${self.since}|${self.detail}|${self.linked}|${self.publishing}`);
+    parts.sort();
+    return parts.join("~");
   }
 
   get hass() {
@@ -198,6 +287,8 @@ export class NWBaseCard extends HTMLElement {
 
   connectedCallback() {
     if (!this._ticker) {
+      // Relative times ("ARMED 3h") move even when no state changes, so this
+      // tick deliberately bypasses the signature guard.
       this._ticker = setInterval(() => this.requestRender(), 30000);
     }
     this.requestRender();

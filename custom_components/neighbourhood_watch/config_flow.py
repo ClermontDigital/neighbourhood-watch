@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 import voluptuous as vol
@@ -16,6 +17,7 @@ from homeassistant.helpers import selector
 
 from .const import (
     CONF_ALERT_HOLD,
+    CONF_CLIENT_ID,
     CONF_ALERT_LINGER,
     CONF_ARMED_ENTITY,
     CONF_HOOD,
@@ -87,6 +89,9 @@ class NeighbourhoodWatchConfigFlow(ConfigFlow, domain=DOMAIN):
                     CONF_PROPERTY_ID: code.property_id,
                     CONF_PROPERTY_NAME: code.name,
                     CONF_TOKEN: code.token,
+                    # Binds the join code to this install on first connect, so
+                    # a code that leaks afterwards is useless to anyone else.
+                    CONF_CLIENT_ID: uuid.uuid4().hex,
                 },
                 options={
                     CONF_ALERT_HOLD: DEFAULT_ALERT_HOLD,
@@ -124,14 +129,22 @@ class NeighbourhoodWatchConfigFlow(ConfigFlow, domain=DOMAIN):
                     errors={"base": "wrong_property"},
                 )
 
-            return self.async_update_reload_and_abort(
+            # Update, then abort, and let the entry's own update listener do
+            # the reload. Reloading from here as well is what Home Assistant
+            # warns about now and stops accepting in 2026.12.
+            self.hass.config_entries.async_update_entry(
                 entry,
-                data_updates={
+                data={
+                    **entry.data,
                     CONF_RELAY_URL: code.relay_url,
                     CONF_TOKEN: code.token,
                     CONF_PROPERTY_NAME: code.name,
+                    # A rotated code clears the relay side binding, so mint a
+                    # fresh client id to bind to.
+                    CONF_CLIENT_ID: uuid.uuid4().hex,
                 },
             )
+            return self.async_abort(reason="reauth_successful")
 
         return self.async_show_form(
             step_id="reauth_confirm", data_schema=STEP_USER_SCHEMA

@@ -13,7 +13,7 @@ import {
   collectSelf,
   define,
   escapeHtml,
-  findEntity,
+  findCompanion,
   registerCard,
   relTime,
   sortProperties,
@@ -50,11 +50,15 @@ const TILE_STYLES = `
     position: relative; flex: none;
   }
   .avatar ha-icon { --mdc-icon-size: 28px; }
-  .offline .avatar {
+  /* The hatch is an overlay rather than a background-image, so a property
+     that supplies a picture does not lose its texture cue and end up
+     distinguished by colour alone. */
+  .offline .avatar::after {
+    content: ""; position: absolute; inset: 0; border-radius: 50%;
     background-image: repeating-linear-gradient(
       45deg, transparent, transparent 4px,
-      color-mix(in srgb, var(--tile-colour) 25%, transparent) 4px,
-      color-mix(in srgb, var(--tile-colour) 25%, transparent) 8px);
+      color-mix(in srgb, var(--tile-colour) 45%, transparent) 4px,
+      color-mix(in srgb, var(--tile-colour) 45%, transparent) 8px);
   }
   .badge {
     position: absolute; bottom: -4px; right: -4px;
@@ -81,8 +85,18 @@ const TILE_STYLES = `
 function tileMarkup(prop) {
   const meta = stateMeta(prop.state);
   const colour = stateColour(prop.state);
+
+  // The class comes from the vocabulary this module owns, never from the
+  // payload. prop.state is another household's data, and interpolating it raw
+  // let it close the attribute and add a real event handler.
+  const token = meta.token;
+
+  // The picture is never built into a CSS string here. It is applied to the
+  // element afterwards, in wireTiles, because the HTML parser decodes entities
+  // in an attribute before the CSS parser reads it, so escaping cannot keep a
+  // quote out of a url().
   const avatar = prop.picture
-    ? `<div class="avatar" style="background-image:url('${escapeHtml(prop.picture)}')"></div>`
+    ? `<div class="avatar has-picture" data-picture="${escapeHtml(prop.picture)}"></div>`
     : `<div class="avatar"><ha-icon icon="${escapeHtml(prop.icon || "mdi:home")}"></ha-icon></div>`;
 
   // The badge repeats the state as an icon so the tile never relies on colour
@@ -93,7 +107,7 @@ function tileMarkup(prop) {
 
   const detail = prop.detail ? ` &middot; ${escapeHtml(prop.detail)}` : "";
   return `
-    <div class="tile ${prop.state}" style="--tile-colour:${colour}"
+    <div class="tile ${token}" style="--tile-colour:${colour}"
          tabindex="0" role="button"
          aria-label="${escapeHtml(prop.name)}, ${meta.label}"
          data-entity="${escapeHtml(prop.entity_id)}">
@@ -105,6 +119,19 @@ function tileMarkup(prop) {
 }
 
 function wireTiles(root, card) {
+  // Apply pictures through the CSSOM. safePicture has already restricted this
+  // to plain https URLs, which is what makes embedding it here safe.
+  root.querySelectorAll(".avatar.has-picture").forEach((el) => {
+    const url = el.dataset.picture;
+    if (!url) return;
+    // safePicture has already rejected quotes, backslashes, parentheses,
+    // angle brackets and whitespace, so this cannot escape the url() string.
+    // CSS.escape would be wrong here: it escapes for identifiers and would
+    // mangle the colons and slashes of a real URL.
+    el.style.backgroundImage = `url("${url}")`;
+    el.removeAttribute("data-picture");
+  });
+
   root.querySelectorAll(".tile").forEach((el) => {
     const entity = el.dataset.entity;
     el.addEventListener("click", () => card.moreInfo(entity));
@@ -127,11 +154,19 @@ class NWCard extends NWBaseCard {
   }
 
   render() {
-    const props = sortProperties(collectProperties(this.hass));
+    const collected = collectProperties(this.hass);
     const self = collectSelf(this.hass);
     if (this._config.include_self !== false && self) {
-      props.unshift({ ...self, name: `${self.name} (you)`, icon: "mdi:home-heart", picture: null });
+      // Included before sorting: pinning yourself to the front would push a
+      // neighbour in PANIC to second place, which breaks the whole point.
+      collected.push({
+        ...self,
+        name: `${self.name} (you)`,
+        icon: "mdi:home-heart",
+        picture: null,
+      });
     }
+    const props = sortProperties(collected);
 
     const title = this._config.title === undefined ? "Neighbourhood" : this._config.title;
     const trouble = props.filter((p) => stateMeta(p.state).urgent).length;
@@ -142,7 +177,7 @@ class NWCard extends NWBaseCard {
 
     this.shadowRoot.innerHTML = `
       ${this.styles(TILE_STYLES)}
-      <div class="nw-card" style="--nw-min:${this._config.min_tile || 120}px">
+      <div class="nw-card" style="--nw-min:${Number(this._config.min_tile) || 120}px">
         ${title ? `<div class="head"><span>${escapeHtml(title)}</span>
           <span class="count">${props.length} ${props.length === 1 ? "property" : "properties"}${
             trouble ? ` &middot; ${trouble} needing attention` : ""
@@ -162,8 +197,13 @@ class NWCard extends NWBaseCard {
 /* ------------------------------------------------------------------ */
 
 class NWTile extends NWBaseCard {
+  static getStubConfig(hass) {
+    const first = collectProperties(hass)[0];
+    return { property: first ? first.id : "" };
+  }
+
   setConfig(config) {
-    if (!config || !config.property) {
+    if (!config || typeof config.property !== "string") {
       throw new Error("neighbourhood-watch-tile needs a property id");
     }
     super.setConfig(config);
@@ -178,7 +218,11 @@ class NWTile extends NWBaseCard {
       <div class="nw-card">
         ${prop
           ? `<div class="grid" style="--nw-min:100%">${tileMarkup(prop)}</div>`
-          : `<div class="empty">Property "${escapeHtml(this._config.property)}" is not in this neighbourhood.</div>`}
+          : `<div class="empty">${
+              this._config.property
+                ? `Property "${escapeHtml(this._config.property)}" is not in this neighbourhood.`
+                : "Pick a property for this tile."
+            }</div>`}
       </div>`;
     wireTiles(this.shadowRoot, this);
   }
@@ -285,6 +329,14 @@ class NWPanic extends NWBaseCard {
     this._start = 0;
   }
 
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    // The hold is a self-rescheduling rAF loop. Without this it survives the
+    // card being removed and still fires: start a press, change your mind,
+    // swipe to another view, and the whole neighbourhood gets a panic.
+    this._abort();
+  }
+
   render() {
     // Rebuild only once: re-rendering mid-hold would drop the press.
     if (this._built) {
@@ -334,7 +386,9 @@ class NWPanic extends NWBaseCard {
 
   _begin(event) {
     if (this._timer) return;
-    event.target.setPointerCapture?.(event.pointerId);
+    // currentTarget, not target: a press landing on the icon or the label
+    // would otherwise capture the pointer on a child element.
+    event.currentTarget.setPointerCapture?.(event.pointerId);
     this._start = performance.now();
     const fill = this.shadowRoot.querySelector(".fill");
 
@@ -361,14 +415,14 @@ class NWPanic extends NWBaseCard {
   }
 
   _fire() {
-    const entity = this._config.entity || findEntity(this.hass, "button.", "_panic");
+    const entity = this._config.entity || findCompanion(this.hass, "button", "_panic");
     if (!entity) return;
     navigator.vibrate?.([40, 60, 120]);
     this.callService("button", "press", { entity_id: entity });
   }
 
   _clear() {
-    const entity = this._config.clear_entity || findEntity(this.hass, "button.", "_clear");
+    const entity = this._config.clear_entity || findCompanion(this.hass, "button", "_clear");
     if (!entity) return;
     this.callService("button", "press", { entity_id: entity });
   }
@@ -451,6 +505,11 @@ class NWLog extends NWBaseCard {
     this._unsub = null;
   }
 
+  /** Driven by its own event feed, not by entity state. */
+  signature() {
+    return null;
+  }
+
   connectedCallback() {
     super.connectedCallback();
     this._subscribe();
@@ -464,6 +523,9 @@ class NWLog extends NWBaseCard {
     }
   }
 
+  // Both accessors are required. An accessor pair occupies one property slot,
+  // so declaring only the setter would destroy the inherited getter and
+  // this.hass would read undefined everywhere in render().
   set hass(hass) {
     super.hass = hass;
     this._subscribe();
@@ -475,7 +537,7 @@ class NWLog extends NWBaseCard {
 
   _subscribe() {
     if (this._unsub || !this._hass || !this._hass.connection) return;
-    this._unsub = this._hass.connection.subscribeEvents((event) => {
+    const promise = this._hass.connection.subscribeEvents((event) => {
       const d = event.data || {};
       this._events.unshift({
         name: d.name || d.property_id,
@@ -483,9 +545,18 @@ class NWLog extends NWBaseCard {
         detail: d.detail,
         at: Math.floor(Date.now() / 1000),
       });
-      this._events = this._events.slice(0, this._config.max || 12);
+      this._events = this._events.slice(0, Number(this._config.max) || 12);
       this.requestRender();
     }, "neighbourhood_watch_status_changed");
+
+    this._unsub = promise;
+    // Without this a rejected subscribe leaves _unsub as a permanently
+    // rejected promise, the guard above blocks every retry, and the log shows
+    // "nothing since this page loaded" forever with an unhandled rejection in
+    // the console.
+    promise.catch(() => {
+      if (this._unsub === promise) this._unsub = null;
+    });
   }
 
   render() {
@@ -527,13 +598,17 @@ class NWBadge extends NWBaseCard {
     const props = collectProperties(this.hass);
     const urgent = props.filter((p) => stateMeta(p.state).urgent);
     const offline = props.filter((p) => p.state === "offline");
-    const worst = urgent.length ? sortProperties(urgent)[0].state : offline.length ? "offline" : "armed";
+
+    // No data must never render as "fine" on a security display.
+    const worst = props.length ? sortProperties(props)[0].state : "unknown";
     const meta = stateMeta(worst);
-    const text = urgent.length
-      ? `${urgent.length} alert${urgent.length > 1 ? "s" : ""}`
-      : offline.length
-        ? `${offline.length} offline`
-        : `${props.length} ok`;
+    const text = !props.length
+      ? "no data"
+      : urgent.length
+        ? `${urgent.length} alert${urgent.length > 1 ? "s" : ""}`
+        : offline.length
+          ? `${offline.length} offline`
+          : `${props.length} ok`;
 
     this.shadowRoot.innerHTML = `
       <style>

@@ -76,3 +76,32 @@ export function clampText(value, max) {
   if (!text) return null;
   return text.slice(0, max);
 }
+
+/**
+ * Accept a picture URL only if it is a plain https:// URL.
+ *
+ * This value ends up in a CSS url() and as entity_picture on every other
+ * property's dashboard, so it is attacker-controlled data heading for other
+ * people's browsers. Rejecting anything with quoting or escaping characters
+ * closes the CSS string as well, belt and braces.
+ */
+export function safePictureUrl(value) {
+  const text = clampText(value, 256);
+  if (!text) return null;
+  if (/["'()\\<>\s]/.test(text)) return null;
+  let parsed;
+  try {
+    parsed = new URL(text);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "https:" || !parsed.hostname) return null;
+  return parsed.toString();
+}
+
+const _byteCounter = new TextEncoder();
+
+/** String.length counts UTF-16 code units; a byte budget needs bytes. */
+export function byteLength(value) {
+  return _byteCounter.encode(value).length;
+}

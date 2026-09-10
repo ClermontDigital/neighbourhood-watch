@@ -10,7 +10,12 @@ sitting, and anything the relay does not need is something it cannot leak.
 ```
 GET wss://<relay>/hood/<hood_id>/ws
 Authorization: Bearer <property_token>
+X-NW-Client: <stable per-install id>
 ```
+
+`X-NW-Client` is optional but strongly recommended. The relay binds a property's token to the
+first client id that presents one, and refuses any other afterwards, so a join code that leaks
+after the property has paired is useless. A client that sends no id is simply not bound.
 
 `hood_id` and property ids match `^[a-z0-9][a-z0-9_-]{0,47}$`.
 
@@ -31,7 +36,21 @@ request.
 `offline` is **not** publishable. It is derived by the relay from connectivity, so a property
 cannot claim to be offline while connected or hide behind a stale state.
 
-Limits: 4096 bytes per frame, 60 status frames per minute, name 64 characters, detail 96.
+Limits, all enforced by the relay:
+
+| Limit | Value |
+|---|---|
+| Frame size | 4096 bytes (measured in bytes, not characters) |
+| Frames per minute, all types | 120, then the socket is closed |
+| Entries into `panic` per hour | 6, then `panic_rate_limited` |
+| Concurrent sockets per property | 3, oldest closed beyond that |
+| `name` / `icon` | 64 characters |
+| `detail` | 96 characters |
+| `picture` | 256 characters, and must be a plain `https://` URL |
+
+Metering covers every frame type. `hello` in particular is not free: each one that changes the
+profile fans out to the whole hood, and each of those becomes a state write in every other
+household's Home Assistant.
 
 ## Relay to property
 
@@ -80,6 +99,11 @@ false offline alerts is a neighbourhood that stops looking at the dashboard.
 
 Clients should also treat 90 seconds of total silence as a dead socket and reconnect. A
 satellite link can black-hole a connection without ever closing it.
+
+The relay does the same from its side: a socket whose last auto-response is older than 2.5 ping
+intervals is closed and its property enters the grace window. Without this a house that has
+fallen off the internet keeps reading as armed and fine indefinitely, which is the worst
+direction for this to fail in.
 
 ## Reconnecting
 
@@ -132,6 +156,9 @@ Everything above is the contract. A conforming relay needs to:
 5. hold the grace window before declaring `offline`
 6. answer `{"t":"ping"}` with `{"t":"pong"}`
 7. close revoked sockets immediately with a `bye`
+8. re-check revocation and expiry on established sessions, not only at connect, since a
+   hibernating socket can otherwise outlive its credential indefinitely
+9. reap sockets that have stopped answering pings
 
 Nothing else is required. There is no persistence obligation beyond the roster and last known
 status.

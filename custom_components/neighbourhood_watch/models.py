@@ -5,7 +5,8 @@ from __future__ import annotations
 import base64
 import binascii
 import json
-from dataclasses import dataclass, field
+import logging
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
@@ -13,10 +14,11 @@ from .const import (
     ALL_STATES,
     JOIN_CODE_PREFIX,
     PROTOCOL_VERSION,
-    STATE_DISARMED,
     STATE_OFFLINE,
     STATE_PRIORITY,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class JoinCodeError(ValueError):
@@ -98,6 +100,23 @@ class JoinCode:
         )
 
 
+def _safe_picture(value: Any) -> str | None:
+    """Only accept a plain https URL for a remote property's picture.
+
+    This ends up in a CSS url() and as entity_picture in this instance's
+    frontend, so it is another household's data heading for this browser.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    text = value.strip()
+    if len(text) > 256 or any(c in text for c in "\"'()\\<> \t\r\n"):
+        return None
+    parsed = urlparse(text)
+    if parsed.scheme != "https" or not parsed.netloc:
+        return None
+    return text
+
+
 @dataclass(slots=True)
 class PropertyStatus:
     """The state of one property in the neighbourhood, local or remote."""
@@ -118,10 +137,19 @@ class PropertyStatus:
         state = payload.get("state")
         if state not in ALL_STATES:
             # A newer relay could introduce a state this version has never
-            # heard of. Showing offline is wrong; showing disarmed is a
-            # dangerous lie. Fall back to the value only if it is a string we
-            # can display, otherwise disarmed.
-            state = state if isinstance(state, str) and state else STATE_DISARMED
+            # heard of. It has to be clamped to something known: the status
+            # sensor is an ENUM whose options are exactly ALL_STATES, and Home
+            # Assistant raises on any value outside them, which would wedge the
+            # entity. Passing the raw string through also put attacker
+            # controlled text into a dashboard class attribute.
+            # Offline is the honest answer to "cannot interpret this".
+            if state is not None:
+                _LOGGER.warning(
+                    "Unknown state %r from relay for property %s, treating as offline",
+                    state,
+                    payload.get("id"),
+                )
+            state = STATE_OFFLINE
 
         return cls(
             id=str(payload.get("id") or ""),
@@ -129,7 +157,7 @@ class PropertyStatus:
             state=state,
             detail=payload.get("detail") or None,
             icon=payload.get("icon") or None,
-            picture=payload.get("picture") or None,
+            picture=_safe_picture(payload.get("picture")),
             since=payload.get("since"),
             last_seen=payload.get("last_seen"),
             online=bool(payload.get("online")),

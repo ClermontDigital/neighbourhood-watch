@@ -4,10 +4,14 @@ import {
   PUBLISHABLE_STATES,
   DEFAULT_GRACE_SECONDS,
   PING_INTERVAL_SECONDS,
+  STALE_PING_MULTIPLIER,
+  MAX_PANIC_PER_HOUR,
+  MAX_SOCKETS_PER_PROPERTY,
+  MAX_FRAMES_PER_MINUTE,
   MAX_MESSAGE_BYTES,
-  MAX_STATUS_PER_MINUTE,
   MAX_NAME_LENGTH,
   MAX_DETAIL_LENGTH,
+  WS_OPEN,
   PING_FRAME,
   PONG_FRAME,
 } from "./protocol.js";
@@ -22,9 +26,12 @@ import {
   bearerToken,
   json,
   clampText,
+  safePictureUrl,
+  byteLength,
 } from "./util.js";
 
 const SWEEP_INTERVAL_SECONDS = 30;
+const STALE_SOCKET_SECONDS = Math.ceil(PING_INTERVAL_SECONDS * STALE_PING_MULTIPLIER);
 
 /**
  * One Durable Object instance per neighbourhood ("hood"). It is the single
@@ -39,7 +46,7 @@ export class Hood extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
-    this.statusBudget = new Map();
+    this.frameBudget = new Map();
 
     ctx.blockConcurrencyWhile(async () => {
       this.#migrate();
@@ -70,7 +77,9 @@ export class Hood extends DurableObject {
         detail          TEXT,
         since           INTEGER NOT NULL,
         last_seen       INTEGER NOT NULL,
-        disconnected_at INTEGER
+        disconnected_at INTEGER,
+        panic_window    INTEGER NOT NULL DEFAULT 0,
+        panic_count     INTEGER NOT NULL DEFAULT 0
       );
       CREATE TABLE IF NOT EXISTS meta (
         key   TEXT PRIMARY KEY,
@@ -84,16 +93,29 @@ export class Hood extends DurableObject {
     return row ? Number(row.value) : DEFAULT_GRACE_SECONDS;
   }
 
+  /**
+   * Sockets that are actually usable for a property.
+   *
+   * getWebSockets() also returns sockets in CLOSING, so presence in that array
+   * is not liveness. Treating a draining socket as live is what previously let
+   * a revoked property block its own grace clock forever.
+   */
+  #liveSockets(propertyId) {
+    return this.ctx
+      .getWebSockets(propertyId)
+      .filter((ws) => ws.readyState === WS_OPEN);
+  }
+
   // ------------------------------------------------------------------
   // Routing
   // ------------------------------------------------------------------
 
   async fetch(request) {
-    const url = new URL(request.pathname ? request.url : request.url);
-    const path = url.pathname;
-
-    if (path.endsWith("/ws")) return this.#handleUpgrade(request);
+    const path = new URL(request.url).pathname;
+    // Check admin before ws: an /admin/ path must never fall into the upgrade
+    // handler just because it happens to end in the wrong characters.
     if (path.includes("/admin/")) return this.#handleAdmin(request, path);
+    if (path.endsWith("/ws")) return this.#handleUpgrade(request);
     return new Response("not found", { status: 404 });
   }
 
@@ -109,7 +131,8 @@ export class Hood extends DurableObject {
     const token = bearerToken(request);
     if (!token) return new Response("missing bearer token", { status: 401 });
 
-    const property = await this.#authenticate(token);
+    const clientId = clampText(request.headers.get("X-NW-Client"), 64);
+    const property = await this.#authenticate(token, clientId);
     if (!property) return new Response("invalid or revoked token", { status: 403 });
 
     const pair = new WebSocketPair();
@@ -117,13 +140,31 @@ export class Hood extends DurableObject {
 
     // Tag by property id so a revoke can find and close exactly its sockets.
     this.ctx.acceptWebSocket(server, [property.id]);
-    server.serializeAttachment({ propertyId: property.id });
+    server.serializeAttachment({ propertyId: property.id, connectedAt: nowSeconds() });
+
+    // Cap concurrency. One extra socket is normal during a reconnect that
+    // overlapped; a pile of them is a property flooding the relay, and each
+    // one multiplies every broadcast.
+    const live = this.#liveSockets(property.id);
+    if (live.length > MAX_SOCKETS_PER_PROPERTY) {
+      for (const old of live.slice(0, live.length - MAX_SOCKETS_PER_PROPERTY)) {
+        if (old === server) continue;
+        this.#closeSocket(old, "too_many_connections", 4008);
+      }
+    }
 
     const now = nowSeconds();
     this.sql.exec(
       `INSERT INTO status (id, state, detail, since, last_seen, disconnected_at)
        VALUES (?, 'disarmed', NULL, ?, ?, NULL)
-       ON CONFLICT(id) DO UPDATE SET last_seen = excluded.last_seen, disconnected_at = NULL`,
+       ON CONFLICT(id) DO UPDATE SET
+         last_seen = excluded.last_seen,
+         disconnected_at = NULL,
+         -- A property that reconnects is no longer offline. Without this it is
+         -- broadcast as state "offline" with online true, and a neighbour's
+         -- offline automation fires on it coming back.
+         state = CASE WHEN status.state = 'offline' THEN 'disarmed' ELSE status.state END,
+         since = CASE WHEN status.state = 'offline' THEN excluded.since ELSE status.since END`,
       property.id,
       now,
       now
@@ -148,28 +189,49 @@ export class Hood extends DurableObject {
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  async #authenticate(token) {
+  async #authenticate(token, clientId) {
     const hash = await sha256Hex(token);
     const rows = this.sql
-      .exec("SELECT id, name, icon, picture, token_hash, revoked, expires FROM properties")
+      .exec(
+        "SELECT id, name, icon, picture, token_hash, revoked, expires, bound_client FROM properties"
+      )
       .toArray();
     const now = nowSeconds();
+
     for (const row of rows) {
       if (!timingSafeEqual(row.token_hash, hash)) continue;
       if (row.revoked) return null;
       if (row.expires && row.expires < now) return null;
+
+      // First-use binding. A join code that leaks after the property has
+      // connected once is useless to anyone else, because their client id will
+      // not match. Clients that send no id are not bound, which keeps
+      // third-party implementations working.
+      if (clientId) {
+        if (row.bound_client && row.bound_client !== clientId) return null;
+        if (!row.bound_client) {
+          this.sql.exec("UPDATE properties SET bound_client = ? WHERE id = ?", clientId, row.id);
+        }
+      }
       return row;
     }
     return null;
   }
 
   async webSocketMessage(ws, raw) {
-    if (typeof raw !== "string" || raw.length > MAX_MESSAGE_BYTES) {
-      return this.#fail(ws, "too_large", "message rejected");
-    }
-
     const { propertyId } = ws.deserializeAttachment() || {};
     if (!propertyId) return ws.close(1011, "unidentified socket");
+
+    // Meter every frame, not just status frames. hello, malformed frames and
+    // unrecognised types all cost SQL writes or broadcasts, and previously
+    // none of them were counted.
+    if (!this.#withinBudget(propertyId)) {
+      return this.#closeSocket(ws, "rate_limited", 4029);
+    }
+
+    if (typeof raw !== "string" || byteLength(raw) > MAX_MESSAGE_BYTES) {
+      return this.#fail(ws, "too_large", "message rejected");
+    }
 
     let msg;
     try {
@@ -177,11 +239,16 @@ export class Hood extends DurableObject {
     } catch {
       return this.#fail(ws, "bad_json", "could not parse message");
     }
+    if (!msg || typeof msg !== "object") {
+      return this.#fail(ws, "bad_json", "could not parse message");
+    }
 
     switch (msg.t) {
       case "ping":
-        // Only reached if auto-response missed, for example a client that
-        // formats its ping differently. Answer anyway.
+        // Only reached when a client's ping is not byte-identical to
+        // PING_FRAME, which means auto-response missed it and this object woke
+        // up for nothing. Worth knowing about.
+        console.warn(`[hood] ping from ${propertyId} missed auto-response`);
         return ws.send(PONG_FRAME);
       case "hello":
         return this.#handleHello(ws, propertyId, msg);
@@ -197,7 +264,13 @@ export class Hood extends DurableObject {
     // else's. Identity itself comes from the authenticated token.
     const name = clampText(msg.name, MAX_NAME_LENGTH);
     const icon = clampText(msg.icon, MAX_NAME_LENGTH);
-    const picture = clampText(msg.picture, 256);
+    // Rejected outright unless it is a plain https URL. This value ends up in
+    // a CSS url() and an entity_picture on every neighbour's dashboard.
+    const picture = safePictureUrl(msg.picture);
+
+    const before = this.sql
+      .exec("SELECT name, icon, picture FROM properties WHERE id = ?", propertyId)
+      .toArray()[0];
 
     this.sql.exec(
       `UPDATE properties
@@ -209,26 +282,57 @@ export class Hood extends DurableObject {
       propertyId
     );
     this.#touch(propertyId);
-    this.#broadcast(this.#propertyView(propertyId));
+
+    // Only broadcast when the profile actually changed. A property looping on
+    // hello previously fanned out to every socket in the hood on every frame,
+    // and each of those became a state write and a recorder row in every other
+    // household's Home Assistant.
+    const after = this.sql
+      .exec("SELECT name, icon, picture FROM properties WHERE id = ?", propertyId)
+      .toArray()[0];
+    if (
+      !before ||
+      before.name !== after.name ||
+      before.icon !== after.icon ||
+      before.picture !== after.picture
+    ) {
+      this.#broadcast(this.#propertyView(propertyId));
+    }
   }
 
   #handleStatus(ws, propertyId, msg) {
     if (!PUBLISHABLE_STATES.includes(msg.state)) {
       return this.#fail(ws, "bad_state", `state must be one of ${PUBLISHABLE_STATES.join(", ")}`);
     }
-    if (!this.#withinBudget(propertyId)) {
-      return this.#fail(ws, "rate_limited", "too many status updates");
-    }
 
     const now = nowSeconds();
     const detail = clampText(msg.detail, MAX_DETAIL_LENGTH);
     const current = this.sql
-      .exec("SELECT state, since FROM status WHERE id = ?", propertyId)
+      .exec("SELECT state, since, panic_window, panic_count FROM status WHERE id = ?", propertyId)
       .toArray()[0];
+
+    const changed = !current || current.state !== msg.state;
+
+    // Entering panic is capped per hour. A genuine panic always gets through;
+    // a compromised or malfunctioning property cannot loop panic and disarmed
+    // to wake every household in the valley all night. The only other remedy
+    // is the hood owner being awake to revoke it.
+    if (msg.state === "panic" && changed) {
+      const hour = Math.floor(now / 3600);
+      const window = current && current.panic_window === hour ? current.panic_count : 0;
+      if (window >= MAX_PANIC_PER_HOUR) {
+        return this.#fail(ws, "panic_rate_limited", "too many panics this hour");
+      }
+      this.sql.exec(
+        "UPDATE status SET panic_window = ?, panic_count = ? WHERE id = ?",
+        hour,
+        window + 1,
+        propertyId
+      );
+    }
 
     // Keep "since" anchored to when the state actually began, not to the last
     // heartbeat, so the dashboard can say ARMED 3h rather than ARMED 30s.
-    const changed = !current || current.state !== msg.state;
     const since = changed ? now : current.since;
 
     this.sql.exec(
@@ -244,6 +348,8 @@ export class Hood extends DurableObject {
       now
     );
 
+    // Nothing changed but the clock: no reason to wake every other household.
+    if (!changed && current && (current.detail || null) === detail) return;
     this.#broadcast(this.#propertyView(propertyId));
   }
 
@@ -261,18 +367,22 @@ export class Hood extends DurableObject {
 
     // Another socket may still be live for this property, for example during a
     // reconnect that overlapped. Only start the grace clock when the last one
-    // goes.
-    const live = this.ctx.getWebSockets(propertyId).filter((s) => s !== ws);
+    // goes, and count only genuinely open sockets.
+    const live = this.#liveSockets(propertyId).filter((s) => s !== ws);
     if (live.length > 0) return;
 
+    await this.#markGone(propertyId);
+  }
+
+  async #markGone(propertyId) {
     const now = nowSeconds();
     this.sql.exec(
-      "UPDATE status SET disconnected_at = ?, last_seen = ? WHERE id = ?",
+      `UPDATE status SET disconnected_at = COALESCE(disconnected_at, ?), last_seen = ?
+       WHERE id = ?`,
       now,
       now,
       propertyId
     );
-
     // Do not broadcast offline yet. That is what the grace window is for: a
     // fifteen second Starlink blip must not light up the whole street.
     await this.#scheduleSweep();
@@ -282,44 +392,81 @@ export class Hood extends DurableObject {
   // Grace window sweep
   // ------------------------------------------------------------------
 
-  async #scheduleSweep() {
+  async #scheduleSweep(delaySeconds = SWEEP_INTERVAL_SECONDS) {
+    const target = Date.now() + delaySeconds * 1000;
     const existing = await this.ctx.storage.getAlarm();
-    if (existing !== null) return;
-    await this.ctx.storage.setAlarm(Date.now() + SWEEP_INTERVAL_SECONDS * 1000);
+    if (existing !== null && existing <= target) return;
+    await this.ctx.storage.setAlarm(target);
   }
 
   async alarm() {
     const grace = this.#grace();
     const now = nowSeconds();
-    const rows = this.sql.exec("SELECT id, state, disconnected_at FROM status").toArray();
 
-    let pending = false;
-    for (const row of rows) {
-      const live = this.ctx.getWebSockets(row.id).length > 0;
-      if (live) {
-        pending = true;
-        continue;
-      }
-      if (row.disconnected_at === null) continue;
-      if (now - row.disconnected_at < grace) {
-        pending = true;
-        continue;
-      }
-      // Grace expired. The property is genuinely gone.
-      if (row.state !== "offline") {
-        this.sql.exec(
-          "UPDATE status SET state = 'offline', detail = NULL, since = ? WHERE id = ?",
-          row.disconnected_at,
-          row.id
-        );
-        this.#broadcast(this.#propertyView(row.id));
+    // 1. Reap sockets that have gone quiet. A satellite link can black-hole a
+    //    connection without ever closing it, so a socket sitting in
+    //    getWebSockets() proves nothing. Without this a house that has fallen
+    //    off the internet reads as armed and fine forever, which is the worst
+    //    possible direction for this to fail in.
+    for (const ws of this.ctx.getWebSockets()) {
+      const attachment = ws.deserializeAttachment() || {};
+      const stamp = this.ctx.getWebSocketAutoResponseTimestamp(ws);
+      const lastHeard = stamp
+        ? Math.floor(stamp.getTime() / 1000)
+        : attachment.connectedAt || now;
+      if (now - lastHeard > STALE_SOCKET_SECONDS) {
+        this.#closeSocket(ws, "stale", 1001);
+        if (attachment.propertyId) await this.#markGone(attachment.propertyId);
       }
     }
 
-    // Keep sweeping only while something could still change. A hood with every
-    // property already offline schedules nothing and costs nothing.
-    if (pending) {
-      await this.ctx.storage.setAlarm(Date.now() + SWEEP_INTERVAL_SECONDS * 1000);
+    // 2. Enforce revocation and expiry on established sessions, not just at
+    //    connect. Hibernation means a socket can live indefinitely at no cost,
+    //    so an expiring credential otherwise grants an unbounded session.
+    for (const row of this.sql
+      .exec("SELECT id FROM properties WHERE revoked = 1 OR (expires IS NOT NULL AND expires < ?)", now)
+      .toArray()) {
+      for (const ws of this.#liveSockets(row.id)) {
+        this.#closeSocket(ws, "revoked", 4003);
+      }
+    }
+
+    // 3. Expire grace windows.
+    let nextDue = null;
+    for (const row of this.sql.exec("SELECT id, state, disconnected_at FROM status").toArray()) {
+      if (this.#liveSockets(row.id).length > 0) continue;
+      if (row.state === "offline") continue;
+
+      // A property with no socket and no disconnect timestamp was never given
+      // one, for example because its socket was closed server side. Treat it
+      // as gone now rather than leaving it showing armed forever.
+      const goneAt = row.disconnected_at === null ? now : row.disconnected_at;
+      if (row.disconnected_at === null) {
+        this.sql.exec("UPDATE status SET disconnected_at = ? WHERE id = ?", now, row.id);
+      }
+
+      const due = goneAt + grace;
+      if (now >= due) {
+        this.sql.exec(
+          "UPDATE status SET state = 'offline', detail = NULL, since = ? WHERE id = ?",
+          goneAt,
+          row.id
+        );
+        this.#broadcast(this.#propertyView(row.id));
+      } else {
+        nextDue = nextDue === null ? due : Math.min(nextDue, due);
+      }
+    }
+
+    // Reschedule only while something is genuinely pending. An alarm prevents
+    // hibernation, so polling every 30s whenever anyone is connected, as this
+    // used to, meant the object never slept at all.
+    const haveSockets = this.ctx.getWebSockets().length > 0;
+    if (nextDue !== null) {
+      await this.#scheduleSweep(Math.max(1, nextDue - now));
+    } else if (haveSockets) {
+      // Still need a slow heartbeat to catch black-holed sockets.
+      await this.#scheduleSweep(STALE_SOCKET_SECONDS);
     }
   }
 
@@ -330,10 +477,10 @@ export class Hood extends DurableObject {
   #propertyView(propertyId) {
     const row = this.sql
       .exec(
-        `SELECT p.id, p.name, p.icon, p.picture, p.revoked,
+        `SELECT p.id, p.name, p.icon, p.picture,
                 s.state, s.detail, s.since, s.last_seen, s.disconnected_at
          FROM properties p LEFT JOIN status s ON s.id = p.id
-         WHERE p.id = ?`,
+         WHERE p.id = ? AND p.revoked = 0`,
         propertyId
       )
       .toArray()[0];
@@ -346,7 +493,7 @@ export class Hood extends DurableObject {
     const now = nowSeconds();
     return this.sql
       .exec(
-        `SELECT p.id, p.name, p.icon, p.picture, p.revoked,
+        `SELECT p.id, p.name, p.icon, p.picture,
                 s.state, s.detail, s.since, s.last_seen, s.disconnected_at
          FROM properties p LEFT JOIN status s ON s.id = p.id
          WHERE p.revoked = 0`
@@ -356,7 +503,7 @@ export class Hood extends DurableObject {
   }
 
   #shape(row, grace, now) {
-    const live = this.ctx.getWebSockets(row.id).length > 0;
+    const live = this.#liveSockets(row.id).length > 0;
     // Inside the grace window a property still counts as online and keeps
     // showing its last known state.
     const withinGrace =
@@ -365,12 +512,18 @@ export class Hood extends DurableObject {
       now - row.disconnected_at < grace;
     const online = live || withinGrace;
 
+    let state = row.state || "disarmed";
+    if (!online) state = "offline";
+    // Never report offline alongside online: the two disagreeing is what makes
+    // a reconnecting property fire a neighbour's offline automation.
+    else if (state === "offline") state = "disarmed";
+
     return {
       id: row.id,
       name: row.name,
       icon: row.icon || null,
       picture: row.picture || null,
-      state: online ? row.state || "disarmed" : "offline",
+      state,
       detail: online ? row.detail || null : null,
       since: row.since || now,
       last_seen: row.last_seen || now,
@@ -383,11 +536,27 @@ export class Hood extends DurableObject {
     const frame = JSON.stringify({ t: "update", property });
     for (const socket of this.ctx.getWebSockets()) {
       if (socket === except) continue;
+      if (socket.readyState !== WS_OPEN) continue;
       try {
         socket.send(frame);
       } catch {
         // Socket is on its way out; the close handler will tidy up.
       }
+    }
+  }
+
+  #closeSocket(ws, reason, code) {
+    // send and close get their own try blocks. Sharing one means a throwing
+    // send silently skips the close, and a revoked property keeps its socket.
+    try {
+      ws.send(JSON.stringify({ t: "bye", reason }));
+    } catch {
+      // ignore
+    }
+    try {
+      ws.close(code, reason);
+    } catch {
+      // ignore
     }
   }
 
@@ -401,13 +570,13 @@ export class Hood extends DurableObject {
 
   #withinBudget(propertyId) {
     const minute = Math.floor(Date.now() / 60000);
-    const entry = this.statusBudget.get(propertyId);
+    const entry = this.frameBudget.get(propertyId);
     if (!entry || entry.minute !== minute) {
-      this.statusBudget.set(propertyId, { minute, count: 1 });
+      this.frameBudget.set(propertyId, { minute, count: 1 });
       return true;
     }
     entry.count += 1;
-    return entry.count <= MAX_STATUS_PER_MINUTE;
+    return entry.count <= MAX_FRAMES_PER_MINUTE;
   }
 
   #fail(ws, code, message) {
@@ -438,7 +607,7 @@ export class Hood extends DurableObject {
     const now = nowSeconds();
     return this.sql
       .exec(
-        `SELECT p.id, p.name, p.icon, p.picture, p.revoked, p.created, p.expires,
+        `SELECT p.id, p.name, p.icon, p.picture, p.revoked, p.created, p.expires, p.bound_client,
                 s.state, s.detail, s.since, s.last_seen, s.disconnected_at
          FROM properties p LEFT JOIN status s ON s.id = p.id`
       )
@@ -446,6 +615,7 @@ export class Hood extends DurableObject {
       .map((row) => ({
         ...this.#shape(row, grace, now),
         revoked: Boolean(row.revoked),
+        bound: Boolean(row.bound_client),
         created: row.created,
         expires: row.expires,
       }));
@@ -464,18 +634,34 @@ export class Hood extends DurableObject {
 
     const name = clampText(body.name, MAX_NAME_LENGTH) || id;
     const icon = clampText(body.icon, MAX_NAME_LENGTH) || "mdi:home";
-    const picture = clampText(body.picture, 256);
+    const picture = safePictureUrl(body.picture);
+    if (body.picture && !picture) {
+      return json({ error: "picture must be an https:// URL" }, 400);
+    }
+
     const token = randomToken();
     const tokenHash = await sha256Hex(token);
     const now = nowSeconds();
-    const expires = body.expires_in ? now + Number(body.expires_in) : null;
+
+    let expires = null;
+    if (body.expires_in !== undefined && body.expires_in !== null) {
+      const seconds = Number(body.expires_in);
+      // NaN would bind as NULL, silently turning "expires in a day" into
+      // "never expires".
+      if (!Number.isFinite(seconds) || seconds <= 0) {
+        return json({ error: "expires_in must be a positive number of seconds" }, 400);
+      }
+      expires = now + Math.floor(seconds);
+    }
 
     this.sql.exec(
       `INSERT INTO properties (id, name, icon, picture, token_hash, revoked, created, expires, bound_client)
        VALUES (?, ?, ?, ?, ?, 0, ?, ?, NULL)
        ON CONFLICT(id) DO UPDATE SET
          name = excluded.name, icon = excluded.icon, picture = excluded.picture,
-         token_hash = excluded.token_hash, revoked = 0, expires = excluded.expires`,
+         token_hash = excluded.token_hash, revoked = 0, expires = excluded.expires,
+         -- A rotated code is meant for a new install, so drop the old binding.
+         bound_client = NULL`,
       id,
       name,
       icon,
@@ -497,13 +683,15 @@ export class Hood extends DurableObject {
     // Rotating a token must kick the old socket, otherwise the previous
     // credential keeps working until it happens to disconnect.
     for (const socket of this.ctx.getWebSockets(id)) {
-      try {
-        socket.send(JSON.stringify({ t: "bye", reason: "token_rotated" }));
-        socket.close(4001, "token rotated");
-      } catch {
-        // ignore
-      }
+      this.#closeSocket(socket, "token_rotated", 4001);
     }
+    // Closing a socket ourselves may not produce a webSocketClose, so start
+    // the grace clock explicitly rather than relying on it.
+    if (existing) await this.#markGone(id);
+
+    // A rename or new picture is invisible to neighbours until the property
+    // reconnects unless we say so now.
+    this.#broadcast(this.#propertyView(id));
 
     const joinCode = encodeJoinCode({
       v: PROTOCOL_VERSION,
@@ -518,21 +706,20 @@ export class Hood extends DurableObject {
     return json({ property_id: id, name, join_code: joinCode, expires });
   }
 
-  #revoke(body) {
+  async #revoke(body) {
     const id = body.id;
     const row = this.sql.exec("SELECT id FROM properties WHERE id = ?", id).toArray()[0];
     if (!row) return json({ error: `no such property ${id}` }, 404);
 
     this.sql.exec("UPDATE properties SET revoked = 1 WHERE id = ?", id);
-    this.sql.exec("UPDATE status SET state = 'offline', disconnected_at = ? WHERE id = ?", nowSeconds(), id);
+    this.sql.exec(
+      "UPDATE status SET state = 'offline', disconnected_at = ? WHERE id = ?",
+      nowSeconds(),
+      id
+    );
 
     for (const socket of this.ctx.getWebSockets(id)) {
-      try {
-        socket.send(JSON.stringify({ t: "bye", reason: "revoked" }));
-        socket.close(4003, "revoked");
-      } catch {
-        // ignore
-      }
+      this.#closeSocket(socket, "revoked", 4003);
     }
 
     // Tell everyone else the property is gone rather than merely quiet.

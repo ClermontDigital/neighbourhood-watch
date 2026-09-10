@@ -9,7 +9,6 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import SIGNAL_PROPERTY_ADDED
 from .coordinator import NeighbourhoodWatchCoordinator
 
 
@@ -36,6 +35,9 @@ def async_add_dynamic_entities(
             entities.extend(factory(property_id))
         return entities
 
+    # Empty at setup time by design: the coordinator starts after the
+    # platforms are forwarded, precisely so the first snapshot is dispatched
+    # into listeners that already exist. This ordering is load bearing.
     initial = _build(list(coordinator.properties))
     if initial:
         async_add_entities(initial)
@@ -46,4 +48,4 @@ def async_add_dynamic_entities(
         if entities:
             async_add_entities(entities)
 
-    return async_dispatcher_connect(hass, SIGNAL_PROPERTY_ADDED, _handle_added)
+    return async_dispatcher_connect(hass, coordinator.signal_added, _handle_added)

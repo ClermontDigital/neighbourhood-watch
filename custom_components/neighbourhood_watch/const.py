@@ -32,6 +32,9 @@ CONF_HOOD: Final = "hood"
 CONF_PROPERTY_ID: Final = "property_id"
 CONF_PROPERTY_NAME: Final = "property_name"
 CONF_TOKEN: Final = "token"
+# Stable per-install id. The relay binds a join code to the first client that
+# presents one, so a code that leaks after pairing is useless to anyone else.
+CONF_CLIENT_ID: Final = "client_id"
 
 # Options, editable afterwards.
 CONF_ARMED_ENTITY: Final = "armed_entity"
@@ -58,15 +61,39 @@ PING_INTERVAL: Final = 30
 # Give up on a socket that has gone quiet for this long even if TCP has not
 # noticed. Starlink can black-hole a connection without closing it.
 RECEIVE_TIMEOUT: Final = 90
+# A connection that stayed up at least this long counts as healthy, so the
+# backoff resets. Judging by "did connect_once return cleanly" instead lets a
+# relay that accepts then immediately closes pin the backoff at its minimum.
+HEALTHY_CONNECTION_SECONDS: Final = 60
+
+# Must be byte identical to PING_FRAME in relay/src/protocol.js. json.dumps
+# inserts a space after the colon by default, which silently defeats the
+# relay's ping auto-response and wakes its Durable Object on every ping.
+PING_FRAME: Final = '{"t":"ping"}'
 
 # Events fired on the local bus. Every instance decides for itself what these
 # mean; the integration ships no opinion about notifications.
 EVENT_STATUS_CHANGED: Final = f"{DOMAIN}_status_changed"
 EVENT_LINK_CHANGED: Final = f"{DOMAIN}_link_changed"
 
-SIGNAL_PROPERTY_UPDATE: Final = f"{DOMAIN}_property_update"
-SIGNAL_PROPERTY_ADDED: Final = f"{DOMAIN}_property_added"
-SIGNAL_LOCAL_UPDATE: Final = f"{DOMAIN}_local_update"
+# Dispatcher signals are per config entry. A bare domain-wide signal makes two
+# configured neighbourhoods cross-contaminate: entry B builds entities for
+# entry A's properties, which then sit permanently unavailable.
+def signal_property_update(entry_id: str) -> str:
+    return f"{DOMAIN}_property_update_{entry_id}"
+
+
+def signal_property_added(entry_id: str) -> str:
+    return f"{DOMAIN}_property_added_{entry_id}"
+
+
+def signal_local_update(entry_id: str) -> str:
+    return f"{DOMAIN}_local_update_{entry_id}"
+
+
+# Suppress repeat events for the same property and state inside this window.
+# Blunts a neighbour that oscillates, on top of the relay's own panic cap.
+EVENT_DEDUPE_SECONDS: Final = 30
 
 SERVICE_PANIC: Final = "panic"
 SERVICE_CLEAR: Final = "clear"

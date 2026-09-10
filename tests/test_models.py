@@ -10,6 +10,7 @@ import pytest
 
 from nw.const import (
     STATE_ALERT,
+    STATE_PRIORITY,
     STATE_ARMED,
     STATE_DISARMED,
     STATE_OFFLINE,
@@ -135,13 +136,45 @@ def test_status_defaults_when_relay_sends_almost_nothing():
     assert status.name == "x"
     assert status.online is False
     # An absent state must not silently read as armed or disarmed.
-    assert status.state == STATE_DISARMED
+    assert status.state == STATE_OFFLINE
 
 
-def test_unknown_state_does_not_crash_priority():
-    """A newer relay could introduce a state this version has never seen."""
+def test_unknown_state_is_clamped_to_offline():
+    """A newer relay could introduce a state this version has never seen.
+
+    It has to be clamped: the status sensor is an ENUM whose options are
+    exactly ALL_STATES and Home Assistant raises on anything outside them, and
+    an unclamped string reached a dashboard class attribute unescaped.
+    """
     status = PropertyStatus.from_payload({"id": "x", "state": "smouldering"})
-    assert status.priority == 5  # sorts last rather than raising
+    assert status.state == STATE_OFFLINE
+    assert status.priority == STATE_PRIORITY.index(STATE_OFFLINE)
+
+
+def test_hostile_state_string_cannot_survive_ingest():
+    """The frontend put this straight into a class attribute."""
+    hostile = 'x" onmouseover="window.pwned=1" data-x="'
+    status = PropertyStatus.from_payload({"id": "x", "state": hostile})
+    assert status.state == STATE_OFFLINE
+
+
+def test_picture_must_be_https():
+    for bad in [
+        "javascript:alert(1)",
+        "http://example.com/a.png",
+        "x');position:fixed;inset:0;background:url('//evil/c.png",
+        "https://evil/a.png');z-index:9999;background:url('x",
+        "/api/camera_proxy/camera.front_gate?token=abc",
+    ]:
+        status = PropertyStatus.from_payload({"id": "x", "picture": bad})
+        assert status.picture is None, bad
+
+
+def test_good_picture_is_kept():
+    status = PropertyStatus.from_payload(
+        {"id": "x", "picture": "https://example.com/family.jpg"}
+    )
+    assert status.picture == "https://example.com/family.jpg"
 
 
 def test_priority_orders_trouble_first():

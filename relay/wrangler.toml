@@ -7,6 +7,10 @@ compatibility_date = "2026-09-01"
 [vars]
 NW_RELAY_URL = "wss://nw.example.com"
 NW_LOCATION_HINT = "oc"
+# Comma separated allowlist of neighbourhood ids. Anything not listed is
+# refused before a Durable Object is created, so nobody can mint billed objects
+# by guessing paths. An empty list accepts nothing.
+NW_HOODS = "clermont-north"
 
 [[durable_objects.bindings]]
 name = "HOOD"

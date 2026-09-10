@@ -11,7 +11,7 @@ export { Hood };
  * open. Nothing connects inbound to a property, so this works behind the CGNAT
  * that Starlink and 4G impose.
  *
- * The Worker does routing and admin authentication only. All hood state lives
+ * The Worker does routing and authentication gating only. All hood state lives
  * in the Hood Durable Object, one instance per neighbourhood.
  */
 export default {
@@ -29,17 +29,31 @@ export default {
     const [, hood, action] = match;
     if (!isValidId(hood)) return json({ error: "invalid hood id" }, 400);
 
-    const stub = hoodStub(env, hood);
-
     if (action === "ws") {
-      // The Durable Object authenticates the property token itself, since it
-      // owns the credential table.
-      return stub.fetch(request);
+      // Gate before the stub is resolved. env.HOOD.idFromName() creates a new
+      // Durable Object for any name, and its constructor provisions SQLite
+      // tables, so forwarding unauthenticated requests lets anyone who knows
+      // the hostname mint unbounded billed objects by guessing hood ids.
+      if (request.headers.get("Upgrade") !== "websocket") {
+        return new Response("expected websocket upgrade", { status: 426 });
+      }
+      if (!bearerToken(request)) {
+        return new Response("missing bearer token", { status: 401 });
+      }
+      if (!(await hoodExists(env, hood))) {
+        return new Response("unknown hood", { status: 404 });
+      }
+      // The Durable Object still authenticates the token itself, since it owns
+      // the credential table. This only stops object creation by strangers.
+      return hoodStub(env, hood).fetch(request);
     }
 
     // Everything under /admin is gated here, before the object sees it.
     const denied = await requireAdmin(request, env);
     if (denied) return denied;
+    if (!(await hoodExists(env, hood)) && !url.pathname.endsWith("/invite")) {
+      return new Response("unknown hood", { status: 404 });
+    }
 
     // Invite codes must carry the public relay URL, which only the Worker
     // knows. Fold it into the body rather than making the operator type it.
@@ -50,9 +64,25 @@ export default {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ ...body, hood, relay_url: relayUrl }),
     });
-    return stub.fetch(forwarded);
+    return hoodStub(env, hood).fetch(forwarded);
   },
 };
+
+/**
+ * Hoods must be declared up front in NW_HOODS, a comma separated list.
+ *
+ * Without an allowlist any request path creates a Durable Object, which is
+ * both a billing problem and an unauthenticated write to storage.
+ */
+async function hoodExists(env, hood) {
+  const declared = String(env.NW_HOODS || "")
+    .split(",")
+    .map((h) => h.trim())
+    .filter(Boolean);
+  // An empty allowlist means the relay has not been configured yet. Fail
+  // closed rather than accepting everything.
+  return declared.includes(hood);
+}
 
 function hoodStub(env, hood) {
   const id = env.HOOD.idFromName(hood);

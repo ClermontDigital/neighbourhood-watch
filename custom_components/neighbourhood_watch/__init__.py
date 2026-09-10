@@ -9,8 +9,17 @@ from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import issue_registry as ir
 
-from .const import DOMAIN, FRONTEND_SCRIPTS, FRONTEND_URL_BASE
+from homeassistant.helpers.device_registry import DeviceEntry
+
+from .const import (
+    CONF_RELAY_URL,
+    CONF_TOKEN,
+    DOMAIN,
+    FRONTEND_SCRIPTS,
+    FRONTEND_URL_BASE,
+)
 from .coordinator import NeighbourhoodWatchCoordinator
 from .services import async_setup_services, async_unload_services
 
@@ -28,7 +37,17 @@ _FRONTEND_KEY = f"{DOMAIN}_frontend_registered"
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up a hood connection from a config entry."""
-    await _async_register_frontend(hass)
+    # A previous run may have raised a repair for a revoked credential. Getting
+    # this far means the credential works now.
+    ir.async_delete_issue(hass, DOMAIN, f"rejected_{entry.entry_id}")
+
+    # Never let a frontend problem stop the integration loading. The entities
+    # and the events are the useful part; the cards are a convenience.
+    try:
+        await _async_register_frontend(hass)
+    except Exception:  # noqa: BLE001
+        hass.data.pop(_FRONTEND_KEY, None)
+        _LOGGER.exception("Could not register the Neighbourhood Watch cards")
 
     coordinator = NeighbourhoodWatchCoordinator(hass, entry)
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
@@ -37,18 +56,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await coordinator.async_start()
 
     async_setup_services(hass)
-    entry.async_on_unload(entry.add_update_listener(_async_options_updated))
+    entry.async_on_unload(entry.add_update_listener(_async_entry_updated))
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Tear down a hood connection."""
-    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-    if not unloaded:
-        return False
-
-    coordinator: NeighbourhoodWatchCoordinator = hass.data[DOMAIN].pop(entry.entry_id)
+    # Stop the relay first. Unloading the platforms first leaves the socket
+    # live, so an incoming snapshot can call async_add_entities on a platform
+    # that has already been reset, which registers orphaned entities that
+    # survive the unload and collide on the next setup.
+    coordinator: NeighbourhoodWatchCoordinator = hass.data[DOMAIN][entry.entry_id]
     await coordinator.async_stop()
+
+    if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
+        return False
+    hass.data[DOMAIN].pop(entry.entry_id, None)
 
     if not hass.data[DOMAIN]:
         hass.data.pop(DOMAIN, None)
@@ -56,12 +79,46 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return True
 
 
-async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
+async def _async_entry_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Handle any change to the entry.
+
+    A credential change needs a full reload, since the transport holds the
+    token. An options change only needs the coordinator to re-read them, which
+    avoids tearing every entity down whenever someone adjusts a slider.
+    """
     coordinator: NeighbourhoodWatchCoordinator | None = hass.data.get(DOMAIN, {}).get(
         entry.entry_id
     )
-    if coordinator is not None:
-        await coordinator.async_options_updated()
+    if coordinator is None:
+        return
+
+    if entry.data.get(CONF_TOKEN) != coordinator.token or entry.data.get(
+        CONF_RELAY_URL
+    ) != coordinator.relay_url:
+        hass.config_entries.async_schedule_reload(entry.entry_id)
+        return
+
+    await coordinator.async_options_updated()
+
+
+async def async_remove_config_entry_device(
+    hass: HomeAssistant, entry: ConfigEntry, device: DeviceEntry
+) -> bool:
+    """Let a user delete the device for a property that has left the hood.
+
+    Without this a revoked neighbour's device sits in the registry forever with
+    no way to remove it from the UI.
+    """
+    coordinator: NeighbourhoodWatchCoordinator | None = hass.data.get(DOMAIN, {}).get(
+        entry.entry_id
+    )
+    if coordinator is None:
+        return True
+
+    live = {f"{entry.entry_id}:self"} | {
+        f"{entry.entry_id}:{property_id}" for property_id in coordinator.properties
+    }
+    return not any(identifier[1] in live for identifier in device.identifiers)
 
 
 async def _async_register_frontend(hass: HomeAssistant) -> None:
@@ -104,11 +161,31 @@ async def _async_add_module(hass: HomeAssistant, url: str) -> None:
     lovelace = hass.data.get("lovelace")
     resources = getattr(lovelace, "resources", None)
     if resources is None:
-        _LOGGER.debug("Lovelace resources unavailable, skipping %s", url)
+        _LOGGER.warning(
+            "Lovelace is not ready, so the Neighbourhood Watch cards were not "
+            "registered. Add %s under Settings > Dashboards > Resources, or "
+            "restart Home Assistant.",
+            url,
+        )
         return
 
-    if not resources.loaded:
-        await resources.async_load()
+    # In Lovelace YAML mode the resource collection is read only: it has
+    # async_items but no async_create_item. Calling it raises AttributeError,
+    # which previously propagated out of async_setup_entry and left the whole
+    # integration in a permanent setup error.
+    if not hasattr(resources, "async_create_item"):
+        _LOGGER.warning(
+            "Lovelace is in YAML mode, so resources cannot be registered "
+            "automatically. Add this to your lovelace resources: %s",
+            url,
+        )
+        return
+
+    # async_get_info ensures the collection is loaded through the supported
+    # path. Calling async_load directly does not set the loaded flag, so it
+    # reloads on every call and rebroadcasts every resource to every open
+    # browser each time.
+    await resources.async_get_info()
 
     base = url.split("?", 1)[0]
     for item in resources.async_items():
