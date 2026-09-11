@@ -26,6 +26,11 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
+# Cloudflare's Browser Integrity Check rejects Python's default User-Agent
+# ("Python-urllib/3.x") with error 1010 before the request reaches the Worker,
+# so without an explicit agent every command fails against a real relay.
+USER_AGENT = "nw-hood/1 (+https://github.com/ClermontDigital/neighbourhood-watch)"
+
 
 def _env(name: str, flag: str) -> str:
     value = os.environ.get(name)
@@ -48,6 +53,7 @@ def _call(args, action: str, payload: dict | None = None) -> dict:
         headers={
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
+            "User-Agent": USER_AGENT,
         },
     )
     try:
@@ -55,6 +61,12 @@ def _call(args, action: str, payload: dict | None = None) -> dict:
             return json.loads(response.read())
     except urllib.error.HTTPError as err:
         detail = err.read().decode(errors="replace")
+        if "1010" in detail:
+            sys.exit(
+                "error: Cloudflare blocked this client (error 1010, browser "
+                "integrity check). This build of nw-hood already sends a "
+                "User-Agent, so check for a WAF rule on the relay's zone."
+            )
         sys.exit(f"error: relay returned {err.code}: {detail}")
     except urllib.error.URLError as err:
         sys.exit(f"error: could not reach {base}: {err.reason}")
