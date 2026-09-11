@@ -21,6 +21,16 @@ a status and nothing more. No cameras, no entities, no presence, no idea who is 
 - 🔒 **Revocable per property** - cutting one off is instant and touches nobody else.
 - 🚀 **HACS ready**
 
+## Screenshots
+
+The Neighbourhood Watch section of a dashboard, with neighbours in every state: panic, person
+detected, offline, armed and disarmed. The banner at the top only appears when something needs
+attention, and your own property is marked YOU.
+
+![Neighbourhood Watch on a desktop dashboard](images/section-desktop.png)
+
+<img src="images/section-mobile.png" alt="Neighbourhood Watch on a phone" width="320">
+
 ## How it works
 
 ```
