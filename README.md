@@ -1,6 +1,6 @@
 # Neighbourhood Watch - Shared Security Status for Home Assistant
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![HACS Badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/custom-components/hacs)
 [![Version](https://img.shields.io/badge/version-0.1.4-green.svg)](https://github.com/ClermontDigital/neighbourhood-watch)
 
@@ -350,4 +350,4 @@ Issues and pull requests welcome at
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+Apache License 2.0. See [LICENSE](LICENSE).
